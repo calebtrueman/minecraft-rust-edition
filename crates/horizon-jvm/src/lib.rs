@@ -1,12 +1,12 @@
 //! A first Rust-owned piece of the Java runtime Minecraft: Rust Edition would need.
 //!
-//! This crate reads JVM class files and can run a small set of static methods
-//! that take and return `int`. It is not a general JVM and does not load Fabric
-//! mods. See `docs/java-mod-compatibility.md` for the intended next steps.
+//! This crate reads JVM class files and can run a small set of methods that use
+//! Java `int` values and simple objects. It is not a general JVM and does not
+//! load Fabric mods. See `docs/java-mod-compatibility.md` for the next steps.
 
 #![forbid(unsafe_code)]
 
-use std::{collections::BTreeMap, error::Error, fmt};
+use std::{cell::RefCell, collections::BTreeMap, error::Error, fmt, sync::Arc};
 
 const MAX_CLASS_BYTES: usize = 16 << 20;
 const MAX_CODE_BYTES: usize = u16::MAX as usize;
@@ -15,6 +15,9 @@ const MAX_CALL_DEPTH: usize = 64;
 const MAX_INSTRUCTION_STEPS: u64 = 10_000_000;
 const MAX_LOADED_CLASSES: usize = 1024;
 const MAX_LOADED_CLASS_BYTES: usize = 128 << 20;
+const MAX_HEAP_OBJECTS: usize = 4096;
+const MAX_OBJECT_FIELDS: usize = 4096;
+const MAX_HEAP_FIELDS: usize = 262_144;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VmError(String);
@@ -41,6 +44,7 @@ enum Constant {
     Utf8(String),
     Class(u16),
     NameAndType { name: u16, descriptor: u16 },
+    FieldRef { class: u16, name_and_type: u16 },
     MethodRef { class: u16, name_and_type: u16 },
     Other,
 }
@@ -62,19 +66,49 @@ pub struct Method {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Field {
+    pub access_flags: u16,
+    pub name: String,
+    pub descriptor: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClassFile {
     pub minor_version: u16,
     pub major_version: u16,
+    pub access_flags: u16,
     pub name: String,
     pub superclass: Option<String>,
+    pub fields: Vec<Field>,
     pub methods: BTreeMap<(String, String), Method>,
     constants: Vec<Constant>,
 }
 
 #[derive(Debug, Default)]
 pub struct Runtime {
-    classes: BTreeMap<String, ClassFile>,
+    classes: BTreeMap<String, Arc<ClassFile>>,
     loaded_bytes: usize,
+    heap: RefCell<Heap>,
+}
+
+#[derive(Debug, Default)]
+struct Heap {
+    objects: Vec<Object>,
+    field_slots: usize,
+}
+
+#[derive(Debug)]
+struct Object {
+    class: Arc<ClassFile>,
+    fields: Vec<i32>,
+}
+
+type ObjectHandle = usize;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Value {
+    Int(i32),
+    Ref(Option<ObjectHandle>),
 }
 
 #[derive(Debug)]
@@ -87,9 +121,26 @@ struct Invocation<'a> {
     class_name: &'a str,
     method_name: &'a str,
     descriptor: &'a str,
-    args: &'a [i32],
+    args: &'a [Value],
     caller: Option<&'a str>,
+    receiver: Receiver,
     depth: usize,
+}
+
+#[derive(Clone, Copy)]
+enum Receiver {
+    Static,
+    Virtual(Option<ObjectHandle>),
+    Special(Option<ObjectHandle>),
+}
+
+impl Receiver {
+    fn object_handle(self) -> Option<Option<ObjectHandle>> {
+        match self {
+            Self::Static => None,
+            Self::Virtual(handle) | Self::Special(handle) => Some(handle),
+        }
+    }
 }
 
 impl Runtime {
@@ -116,7 +167,7 @@ impl Runtime {
         }
         let name = class.name.clone();
         self.loaded_bytes += bytes.len();
-        self.classes.insert(name.clone(), class);
+        self.classes.insert(name.clone(), Arc::new(class));
         Ok(name)
     }
 
@@ -130,26 +181,228 @@ impl Runtime {
         args: &[i32],
         step_limit: u64,
     ) -> Result<i32> {
+        *self.heap.borrow_mut() = Heap::default();
+        let values: Vec<Value> = args.iter().copied().map(Value::Int).collect();
         let mut budget = InstructionBudget {
             steps: 0,
             limit: step_limit.min(MAX_INSTRUCTION_STEPS),
         };
-        self.invoke_static(
+        match self.invoke_method(
             Invocation {
                 class_name,
                 method_name,
                 descriptor,
-                args,
+                args: &values,
                 caller: None,
+                receiver: Receiver::Static,
                 depth: 0,
             },
             &mut budget,
-        )
+        )? {
+            Some(Value::Int(value)) => Ok(value),
+            Some(Value::Ref(_)) => Err(VmError::new("entry method returned a reference")),
+            None => Err(VmError::new("entry method did not return an int")),
+        }
     }
 
-    fn invoke_static(&self, call: Invocation<'_>, budget: &mut InstructionBudget) -> Result<i32> {
+    fn allocate_object(&self, class_name: &str) -> Result<ObjectHandle> {
+        let class = self
+            .classes
+            .get(class_name)
+            .ok_or_else(|| VmError::new(format!("class not loaded: {class_name}")))?;
+        if class.access_flags & 0x0200 != 0 {
+            return Err(VmError::new(format!(
+                "cannot allocate interface: {class_name}"
+            )));
+        }
+        if class.access_flags & 0x0400 != 0 {
+            return Err(VmError::new(format!(
+                "cannot allocate abstract class: {class_name}"
+            )));
+        }
+        if class.methods.keys().any(|(name, _)| name == "<clinit>") {
+            return Err(VmError::new(format!(
+                "class initialization is not supported: {class_name}"
+            )));
+        }
+        if class.superclass.as_deref() != Some("java/lang/Object") {
+            return Err(VmError::new(format!(
+                "only classes directly based on java/lang/Object can be allocated: {class_name}"
+            )));
+        }
+        let instance_fields: Vec<_> = class
+            .fields
+            .iter()
+            .filter(|field| field.access_flags & 0x0008 == 0)
+            .collect();
+        if instance_fields.len() > MAX_OBJECT_FIELDS {
+            return Err(VmError::new(
+                "object field count exceeds the 4096-field limit",
+            ));
+        }
+        if instance_fields.iter().any(|field| field.descriptor != "I") {
+            return Err(VmError::new(
+                "only instance int fields are supported for allocated objects",
+            ));
+        }
+
+        let mut heap = self.heap.borrow_mut();
+        if heap.objects.len() >= MAX_HEAP_OBJECTS {
+            return Err(VmError::new("object count exceeds the 4096-object limit"));
+        }
+        let field_slots = heap
+            .field_slots
+            .checked_add(instance_fields.len())
+            .ok_or_else(|| VmError::new("object field storage size overflow"))?;
+        if field_slots > MAX_HEAP_FIELDS {
+            return Err(VmError::new(
+                "object field storage exceeds the 262144-field limit",
+            ));
+        }
+        let handle = heap.objects.len();
+        heap.objects.push(Object {
+            class: Arc::clone(class),
+            fields: vec![0; instance_fields.len()],
+        });
+        heap.field_slots = field_slots;
+        Ok(handle)
+    }
+
+    fn instance_field_index(
+        &self,
+        owner: &str,
+        name: &str,
+        descriptor: &str,
+        caller: &str,
+    ) -> Result<usize> {
+        let class = self
+            .classes
+            .get(owner)
+            .ok_or_else(|| VmError::new(format!("class not loaded: {owner}")))?;
+        let mut instance_index = 0;
+        for field in &class.fields {
+            let is_static = field.access_flags & 0x0008 != 0;
+            if field.name == name && field.descriptor == descriptor {
+                if is_static {
+                    return Err(VmError::new(format!(
+                        "static field access is not supported: {owner}.{name}:{descriptor}"
+                    )));
+                }
+                if descriptor != "I" {
+                    return Err(VmError::new(format!(
+                        "only int fields are supported: {owner}.{name}:{descriptor}"
+                    )));
+                }
+                if !method_accessible(field.access_flags, caller, owner) {
+                    return Err(VmError::new(format!(
+                        "field access denied: {owner}.{name}:{descriptor}"
+                    )));
+                }
+                return Ok(instance_index);
+            }
+            if !is_static {
+                instance_index += 1;
+            }
+        }
+        Err(VmError::new(format!(
+            "field not found: {owner}.{name}:{descriptor}"
+        )))
+    }
+
+    fn get_int_field(
+        &self,
+        handle: ObjectHandle,
+        owner: &str,
+        name: &str,
+        descriptor: &str,
+        caller: &str,
+    ) -> Result<i32> {
+        let index = self.instance_field_index(owner, name, descriptor, caller)?;
+        let heap = self.heap.borrow();
+        let object = heap
+            .objects
+            .get(handle)
+            .ok_or_else(|| VmError::new("invalid object reference"))?;
+        if object.class.name != owner {
+            return Err(VmError::new(format!(
+                "field receiver class mismatch: expected {owner}, found {}",
+                object.class.name
+            )));
+        }
+        object
+            .fields
+            .get(index)
+            .copied()
+            .ok_or_else(|| VmError::new("object field index is out of range"))
+    }
+
+    fn put_int_field(
+        &self,
+        handle: ObjectHandle,
+        owner: &str,
+        name: &str,
+        descriptor: &str,
+        caller: &str,
+        value: i32,
+    ) -> Result<()> {
+        let index = self.instance_field_index(owner, name, descriptor, caller)?;
+        let mut heap = self.heap.borrow_mut();
+        let object = heap
+            .objects
+            .get_mut(handle)
+            .ok_or_else(|| VmError::new("invalid object reference"))?;
+        if object.class.name != owner {
+            return Err(VmError::new(format!(
+                "field receiver class mismatch: expected {owner}, found {}",
+                object.class.name
+            )));
+        }
+        *object
+            .fields
+            .get_mut(index)
+            .ok_or_else(|| VmError::new("object field index is out of range"))? = value;
+        Ok(())
+    }
+
+    fn invoke_method(
+        &self,
+        call: Invocation<'_>,
+        budget: &mut InstructionBudget,
+    ) -> Result<Option<Value>> {
         if call.depth >= MAX_CALL_DEPTH {
             return Err(VmError::new("method call depth limit reached"));
+        }
+        let actual_object = if let Some(handle) = call.receiver.object_handle() {
+            let handle =
+                handle.ok_or_else(|| VmError::new("null object reference at method call"))?;
+            let heap = self.heap.borrow();
+            let object = heap
+                .objects
+                .get(handle)
+                .ok_or_else(|| VmError::new("invalid object reference"))?;
+            Some((object.class.name.clone(), object.class.superclass.clone()))
+        } else {
+            None
+        };
+        if matches!(call.receiver, Receiver::Special(_))
+            && call.class_name == "java/lang/Object"
+            && call.method_name == "<init>"
+            && call.descriptor == "()V"
+        {
+            return match actual_object {
+                Some((_, Some(parent))) if parent == "java/lang/Object" => Ok(None),
+                _ => Err(VmError::new(
+                    "java/lang/Object constructor needs an object based on Object",
+                )),
+            };
+        }
+        if let Some((actual_class, _)) = actual_object {
+            if actual_class != call.class_name {
+                return Err(VmError::new(format!(
+                    "method receiver class mismatch: expected {}, found {actual_class}",
+                    call.class_name
+                )));
+            }
         }
         let class = self
             .classes
@@ -164,9 +417,10 @@ impl Runtime {
                     call.class_name, call.method_name, call.descriptor
                 ))
             })?;
-        if method.access_flags & 0x0008 == 0 {
+        let is_static = method.access_flags & 0x0008 != 0;
+        if is_static != matches!(call.receiver, Receiver::Static) {
             return Err(VmError::new(format!(
-                "method is not static: {}.{}{}",
+                "method static mismatch: {}.{}{}",
                 call.class_name, call.method_name, call.descriptor
             )));
         }
@@ -199,14 +453,44 @@ impl Runtime {
                 )));
             }
         }
-        if method_descriptor_arity(call.descriptor)? != call.args.len() {
+        let (arity, return_type) = method_descriptor(call.descriptor)?;
+        if arity != call.args.len() {
             return Err(VmError::new("argument count does not match the descriptor"));
+        }
+        if call
+            .args
+            .iter()
+            .any(|value| !matches!(value, Value::Int(_)))
+        {
+            return Err(VmError::new("only int method arguments are supported"));
+        }
+        let is_constructor = call.method_name == "<init>";
+        if is_constructor && !matches!(call.receiver, Receiver::Special(_)) {
+            return Err(VmError::new(
+                "constructors must be called with invokespecial",
+            ));
+        }
+        if is_constructor && return_type != ReturnType::Void {
+            return Err(VmError::new("constructors must return void"));
+        }
+        if !is_constructor && return_type != ReturnType::Int {
+            return Err(VmError::new(
+                "only instance and static methods returning int are supported",
+            ));
         }
         let code = method
             .code
             .as_ref()
             .ok_or_else(|| VmError::new("method has no Code attribute"))?;
-        run(self, class, code, call.args, budget, call.depth)
+        run(
+            self,
+            class,
+            code,
+            call.args,
+            call.receiver,
+            budget,
+            call.depth,
+        )
     }
 }
 
@@ -224,7 +508,7 @@ impl ClassFile {
         let major_version = r.u2()?;
         let constants = read_constants(&mut r)?;
 
-        r.u2()?; // class access flags
+        let access_flags = r.u2()?;
         let name = class_name(&constants, r.u2()?)?;
         let super_index = r.u2()?;
         let superclass = if super_index == 0 {
@@ -237,7 +521,19 @@ impl ClassFile {
         for _ in 0..interface_count {
             class_name(&constants, r.u2()?)?;
         }
-        skip_members(&mut r, &constants)?; // fields
+        let mut fields = Vec::new();
+        let field_count = r.u2()? as usize;
+        for _ in 0..field_count {
+            let access_flags = r.u2()?;
+            let field_name = utf8(&constants, r.u2()?)?.to_owned();
+            let descriptor = utf8(&constants, r.u2()?)?.to_owned();
+            skip_attributes(&mut r, &constants)?;
+            fields.push(Field {
+                access_flags,
+                name: field_name,
+                descriptor,
+            });
+        }
 
         let mut methods = BTreeMap::new();
         let method_count = r.u2()? as usize;
@@ -280,8 +576,10 @@ impl ClassFile {
         Ok(Self {
             minor_version,
             major_version,
+            access_flags,
             name,
             superclass,
+            fields,
             methods,
             constants,
         })
@@ -298,7 +596,9 @@ impl ClassFile {
         step_limit: u64,
     ) -> Result<i32> {
         let mut runtime = Runtime::new();
-        runtime.classes.insert(self.name.clone(), self.clone());
+        runtime
+            .classes
+            .insert(self.name.clone(), Arc::new(self.clone()));
         runtime.run_static_i32(&self.name, name, descriptor, args, step_limit)
     }
 
@@ -325,6 +625,30 @@ impl ClassFile {
             utf8(&self.constants, descriptor_index)?.to_owned(),
         ))
     }
+
+    fn field_ref(&self, index: u16) -> Result<(String, String, String)> {
+        let (class_index, name_and_type_index) = match self.constants.get(index as usize) {
+            Some(Constant::FieldRef {
+                class,
+                name_and_type,
+            }) => (*class, *name_and_type),
+            _ => return Err(VmError::new("constant-pool index is not a field reference")),
+        };
+        let (name_index, descriptor_index) = match self.constants.get(name_and_type_index as usize)
+        {
+            Some(Constant::NameAndType { name, descriptor }) => (*name, *descriptor),
+            _ => return Err(VmError::new("field reference has no name and type")),
+        };
+        Ok((
+            class_name(&self.constants, class_index)?,
+            utf8(&self.constants, name_index)?.to_owned(),
+            utf8(&self.constants, descriptor_index)?.to_owned(),
+        ))
+    }
+
+    fn class_ref(&self, index: u16) -> Result<String> {
+        class_name(&self.constants, index)
+    }
 }
 
 fn read_constants(r: &mut Reader<'_>) -> Result<Vec<Constant>> {
@@ -341,10 +665,14 @@ fn read_constants(r: &mut Reader<'_>) -> Result<Vec<Constant>> {
                 entries.push(Constant::Utf8(decode_modified_utf8(r.take(length)?)?));
             }
             7 => entries.push(Constant::Class(r.u2()?)),
-            3 | 4 | 9 | 17 | 18 => {
+            3 | 4 | 17 | 18 => {
                 r.skip(4)?;
                 entries.push(Constant::Other);
             }
+            9 => entries.push(Constant::FieldRef {
+                class: r.u2()?,
+                name_and_type: r.u2()?,
+            }),
             10 | 11 => entries.push(Constant::MethodRef {
                 class: r.u2()?,
                 name_and_type: r.u2()?,
@@ -388,17 +716,6 @@ fn class_name(constants: &[Constant], index: u16) -> Result<String> {
         Some(Constant::Class(name_index)) => Ok(utf8(constants, *name_index)?.to_owned()),
         _ => Err(VmError::new("constant-pool index is not a class")),
     }
-}
-
-fn skip_members(r: &mut Reader<'_>, constants: &[Constant]) -> Result<()> {
-    let count = r.u2()? as usize;
-    for _ in 0..count {
-        r.skip(2)?; // access flags
-        utf8(constants, r.u2()?)?;
-        utf8(constants, r.u2()?)?; // field name and descriptor
-        skip_attributes(r, constants)?;
-    }
-    Ok(())
 }
 
 fn skip_attributes(r: &mut Reader<'_>, constants: &[Constant]) -> Result<()> {
@@ -489,23 +806,36 @@ fn decode_modified_utf8(bytes: &[u8]) -> Result<String> {
     String::from_utf16(&units).map_err(|_| VmError::new("invalid UTF-16 in modified UTF-8"))
 }
 
-fn method_descriptor_arity(descriptor: &str) -> Result<usize> {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReturnType {
+    Int,
+    Void,
+}
+
+fn method_descriptor(descriptor: &str) -> Result<(usize, ReturnType)> {
     let bytes = descriptor.as_bytes();
     if bytes.first() != Some(&b'(') {
         return Err(VmError::new(
-            "only descriptors with int arguments are supported",
+            "only method descriptors with int arguments are supported",
         ));
     }
     let close = bytes
         .iter()
         .position(|b| *b == b')')
         .ok_or_else(|| VmError::new("malformed method descriptor"))?;
-    if bytes[1..close].iter().any(|b| *b != b'I') || bytes.get(close + 1..) != Some(b"I") {
-        return Err(VmError::new(
-            "only int arguments and an int result are supported",
-        ));
+    if bytes[1..close].iter().any(|b| *b != b'I') {
+        return Err(VmError::new("only int method arguments are supported"));
     }
-    Ok(close - 1)
+    let return_type = match bytes.get(close + 1..) {
+        Some(b"I") => ReturnType::Int,
+        Some(b"V") => ReturnType::Void,
+        _ => {
+            return Err(VmError::new(
+                "only int and void method results are supported",
+            ));
+        }
+    };
+    Ok((close - 1, return_type))
 }
 
 fn method_accessible(flags: u16, caller: &str, owner: &str) -> bool {
@@ -525,10 +855,11 @@ fn run(
     runtime: &Runtime,
     class: &ClassFile,
     code: &Code,
-    args: &[i32],
+    args: &[Value],
+    receiver: Receiver,
     budget: &mut InstructionBudget,
     depth: usize,
-) -> Result<i32> {
+) -> Result<Option<Value>> {
     if code.exception_handlers != 0 {
         return Err(VmError::new("Java exception handlers are not supported"));
     }
@@ -537,16 +868,28 @@ fn run(
     if stack_limit > MAX_FRAME_SLOTS || local_count > MAX_FRAME_SLOTS {
         return Err(VmError::new("method frame exceeds the 4096-slot limit"));
     }
-    if args.len() > local_count {
+    let receiver_slots = usize::from(!matches!(receiver, Receiver::Static));
+    if args.len() + receiver_slots > local_count {
         return Err(VmError::new(
             "method has too few local slots for its arguments",
         ));
     }
     let boundaries = validate_instructions(&code.bytes)?;
-    let mut locals = vec![0_i32; local_count];
+    let mut locals = vec![Value::Int(0); local_count];
     let mut initialized = vec![false; local_count];
-    locals[..args.len()].copy_from_slice(args);
-    initialized[..args.len()].fill(true);
+    let mut arg_start = 0;
+    if let Some(handle) = receiver.object_handle() {
+        locals[0] = Value::Ref(handle);
+        initialized[0] = true;
+        arg_start = 1;
+    }
+    for (index, value) in args.iter().copied().enumerate() {
+        if !matches!(value, Value::Int(_)) {
+            return Err(VmError::new("only int method arguments are supported"));
+        }
+        locals[arg_start + index] = value;
+        initialized[arg_start + index] = true;
+    }
     let mut stack = Vec::with_capacity(stack_limit.min(256));
     let mut pc = 0_usize;
 
@@ -565,94 +908,174 @@ fn run(
         let mut jump = None;
         match op {
             0x00 => {}
-            0x02..=0x08 => push(&mut stack, op as i32 - 0x03, stack_limit)?,
-            0x10 => push(&mut stack, code.bytes[pc + 1] as i8 as i32, stack_limit)?,
-            0x11 => push(
+            0x01 => push(&mut stack, Value::Ref(None), stack_limit)?,
+            0x02..=0x08 => push(&mut stack, Value::Int(op as i32 - 0x03), stack_limit)?,
+            0x10 => push(
                 &mut stack,
-                i16::from_be_bytes([code.bytes[pc + 1], code.bytes[pc + 2]]) as i32,
+                Value::Int(code.bytes[pc + 1] as i8 as i32),
                 stack_limit,
             )?,
-            0x15 => load(
+            0x11 => push(
+                &mut stack,
+                Value::Int(i16::from_be_bytes([code.bytes[pc + 1], code.bytes[pc + 2]]) as i32),
+                stack_limit,
+            )?,
+            0x15 => load_int(
                 &mut stack,
                 &locals,
                 &initialized,
                 code.bytes[pc + 1] as usize,
                 stack_limit,
             )?,
-            0x1a..=0x1d => load(
+            0x19 => load_ref(
+                &mut stack,
+                &locals,
+                &initialized,
+                code.bytes[pc + 1] as usize,
+                stack_limit,
+            )?,
+            0x1a..=0x1d => load_int(
                 &mut stack,
                 &locals,
                 &initialized,
                 (op - 0x1a) as usize,
                 stack_limit,
             )?,
-            0x36 => store(
+            0x2a..=0x2d => load_ref(
+                &mut stack,
+                &locals,
+                &initialized,
+                (op - 0x2a) as usize,
+                stack_limit,
+            )?,
+            0x36 => store_int(
                 &mut stack,
                 &mut locals,
                 &mut initialized,
                 code.bytes[pc + 1] as usize,
             )?,
-            0x3b..=0x3e => store(
+            0x3a => store_ref(
+                &mut stack,
+                &mut locals,
+                &mut initialized,
+                code.bytes[pc + 1] as usize,
+            )?,
+            0x4b..=0x4e => store_ref(
+                &mut stack,
+                &mut locals,
+                &mut initialized,
+                (op - 0x4b) as usize,
+            )?,
+            0x3b..=0x3e => store_int(
                 &mut stack,
                 &mut locals,
                 &mut initialized,
                 (op - 0x3b) as usize,
             )?,
-            0x60 => binary(&mut stack, |a, b| Ok(a.wrapping_add(b)))?,
-            0x64 => binary(&mut stack, |a, b| Ok(a.wrapping_sub(b)))?,
-            0x68 => binary(&mut stack, |a, b| Ok(a.wrapping_mul(b)))?,
-            0x6c => binary(&mut stack, java_div)?,
-            0x70 => binary(&mut stack, java_rem)?,
+            0x57 => {
+                pop(&mut stack)?;
+            }
+            0x59 => {
+                let value = *stack
+                    .last()
+                    .ok_or_else(|| VmError::new("operand stack underflow at dup"))?;
+                push(&mut stack, value, stack_limit)?;
+            }
+            0x60 => binary(&mut stack, stack_limit, |a, b| Ok(a.wrapping_add(b)))?,
+            0x64 => binary(&mut stack, stack_limit, |a, b| Ok(a.wrapping_sub(b)))?,
+            0x68 => binary(&mut stack, stack_limit, |a, b| Ok(a.wrapping_mul(b)))?,
+            0x6c => binary(&mut stack, stack_limit, java_div)?,
+            0x70 => binary(&mut stack, stack_limit, java_rem)?,
             0x74 => {
-                let value = pop(&mut stack)?;
-                push(&mut stack, value.wrapping_neg(), stack_limit)?;
+                let value = pop_int(&mut stack)?;
+                push(&mut stack, Value::Int(value.wrapping_neg()), stack_limit)?;
             }
             0x84 => {
                 let index = code.bytes[pc + 1] as usize;
                 let amount = code.bytes[pc + 2] as i8 as i32;
-                let value = locals
+                let slot = locals
                     .get_mut(index)
                     .ok_or_else(|| VmError::new("local index is out of range"))?;
                 if !initialized[index] {
                     return Err(VmError::new("local variable is not initialized"));
                 }
-                *value = value.wrapping_add(amount);
+                match slot {
+                    Value::Int(value) => *value = value.wrapping_add(amount),
+                    Value::Ref(_) => return Err(VmError::new("local variable is not an int")),
+                }
             }
             0x99..=0x9e => {
-                let value = pop(&mut stack)?;
+                let value = pop_int(&mut stack)?;
                 if test_zero(op, value) {
                     jump = Some(branch_target(start, &code.bytes)?);
                 }
             }
             0x9f..=0xa4 => {
-                let right = pop(&mut stack)?;
-                let left = pop(&mut stack)?;
+                let right = pop_int(&mut stack)?;
+                let left = pop_int(&mut stack)?;
                 if test_pair(op, left, right) {
                     jump = Some(branch_target(start, &code.bytes)?);
                 }
             }
             0xa7 => jump = Some(branch_target(start, &code.bytes)?),
-            0xb8 => {
+            0xb4 => {
+                let reference = u16::from_be_bytes([code.bytes[pc + 1], code.bytes[pc + 2]]);
+                let (owner, name, descriptor) = class.field_ref(reference)?;
+                let handle = pop_non_null_ref(&mut stack, "field access")?;
+                let value =
+                    runtime.get_int_field(handle, &owner, &name, &descriptor, &class.name)?;
+                push(&mut stack, Value::Int(value), stack_limit)?;
+            }
+            0xb5 => {
+                let reference = u16::from_be_bytes([code.bytes[pc + 1], code.bytes[pc + 2]]);
+                let (owner, name, descriptor) = class.field_ref(reference)?;
+                let value = pop_int(&mut stack)?;
+                let handle = pop_non_null_ref(&mut stack, "field access")?;
+                runtime.put_int_field(handle, &owner, &name, &descriptor, &class.name, value)?;
+            }
+            0xb6..=0xb8 => {
                 let reference = u16::from_be_bytes([code.bytes[pc + 1], code.bytes[pc + 2]]);
                 let (target_class, target_name, target_descriptor) = class.method_ref(reference)?;
-                let arity = method_descriptor_arity(&target_descriptor)?;
-                if stack.len() < arity {
-                    return Err(VmError::new("operand stack underflow at invokestatic"));
+                let (arity, _) = method_descriptor(&target_descriptor)?;
+                let receiver_slots = usize::from(op != 0xb8);
+                if stack.len() < arity + receiver_slots {
+                    return Err(VmError::new("operand stack underflow at method call"));
                 }
                 let first_arg = stack.len() - arity;
-                let call_args: Vec<i32> = stack.drain(first_arg..).collect();
-                let value = runtime.invoke_static(
+                let call_args: Vec<Value> = stack.drain(first_arg..).collect();
+                let receiver = if op == 0xb8 {
+                    Receiver::Static
+                } else {
+                    let handle = pop_ref(&mut stack)?;
+                    if op == 0xb6 {
+                        Receiver::Virtual(handle)
+                    } else {
+                        Receiver::Special(handle)
+                    }
+                };
+                let result = runtime.invoke_method(
                     Invocation {
                         class_name: &target_class,
                         method_name: &target_name,
                         descriptor: &target_descriptor,
                         args: &call_args,
                         caller: Some(&class.name),
+                        receiver,
                         depth: depth + 1,
                     },
                     budget,
                 )?;
-                push(&mut stack, value, stack_limit)?;
+                match result {
+                    Some(value) => push(&mut stack, value, stack_limit)?,
+                    None if op == 0xb7 && target_name == "<init>" => {}
+                    None => return Err(VmError::new("method call returned no int value")),
+                }
+            }
+            0xbb => {
+                let class_index = u16::from_be_bytes([code.bytes[pc + 1], code.bytes[pc + 2]]);
+                let target_class = class.class_ref(class_index)?;
+                let handle = runtime.allocate_object(&target_class)?;
+                push(&mut stack, Value::Ref(Some(handle)), stack_limit)?;
             }
             0xac => {
                 if stack.is_empty() {
@@ -661,7 +1084,13 @@ fn run(
                 if stack.len() != 1 {
                     return Err(VmError::new("invalid operand stack at ireturn"));
                 }
-                return pop(&mut stack);
+                return Ok(Some(Value::Int(pop_int(&mut stack)?)));
+            }
+            0xb1 => {
+                if !stack.is_empty() {
+                    return Err(VmError::new("invalid operand stack at return"));
+                }
+                return Ok(None);
             }
             _ => return Err(VmError::new(format!("unsupported opcode 0x{op:02x}"))),
         }
@@ -675,9 +1104,14 @@ fn run(
 fn instruction_len(op: u8) -> Result<usize> {
     match op {
         0x00
+        | 0x01
         | 0x02..=0x08
         | 0x1a..=0x1d
+        | 0x2a..=0x2d
         | 0x3b..=0x3e
+        | 0x4b..=0x4e
+        | 0x57
+        | 0x59
         | 0x60
         | 0x64
         | 0x68
@@ -685,9 +1119,10 @@ fn instruction_len(op: u8) -> Result<usize> {
         | 0x70
         | 0x74
         | 0x99..=0xa7
-        | 0xac => Ok(if (0x99..=0xa7).contains(&op) { 3 } else { 1 }),
-        0x10 | 0x15 | 0x36 => Ok(2),
-        0x11 | 0x84 | 0xb8 => Ok(3),
+        | 0xac
+        | 0xb1 => Ok(if (0x99..=0xa7).contains(&op) { 3 } else { 1 }),
+        0x10 | 0x15 | 0x19 | 0x36 | 0x3a => Ok(2),
+        0x11 | 0x84 | 0xb4..=0xbb => Ok(3),
         _ => Err(VmError::new(format!("unsupported opcode 0x{op:02x}"))),
     }
 }
@@ -749,7 +1184,7 @@ fn test_pair(op: u8, left: i32, right: i32) -> bool {
     }
 }
 
-fn push(stack: &mut Vec<i32>, value: i32, limit: usize) -> Result<()> {
+fn push(stack: &mut Vec<Value>, value: Value, limit: usize) -> Result<()> {
     if stack.len() >= limit {
         return Err(VmError::new("operand stack exceeds max_stack"));
     }
@@ -757,15 +1192,35 @@ fn push(stack: &mut Vec<i32>, value: i32, limit: usize) -> Result<()> {
     Ok(())
 }
 
-fn pop(stack: &mut Vec<i32>) -> Result<i32> {
+fn pop(stack: &mut Vec<Value>) -> Result<Value> {
     stack
         .pop()
         .ok_or_else(|| VmError::new("operand stack underflow"))
 }
 
-fn load(
-    stack: &mut Vec<i32>,
-    locals: &[i32],
+fn pop_int(stack: &mut Vec<Value>) -> Result<i32> {
+    match pop(stack)? {
+        Value::Int(value) => Ok(value),
+        Value::Ref(_) => Err(VmError::new("operand stack value is not an int")),
+    }
+}
+
+fn pop_ref(stack: &mut Vec<Value>) -> Result<Option<ObjectHandle>> {
+    match pop(stack)? {
+        Value::Ref(handle) => Ok(handle),
+        Value::Int(_) => Err(VmError::new(
+            "operand stack value is not an object reference",
+        )),
+    }
+}
+
+fn pop_non_null_ref(stack: &mut Vec<Value>, operation: &str) -> Result<ObjectHandle> {
+    pop_ref(stack)?.ok_or_else(|| VmError::new(format!("null object reference at {operation}")))
+}
+
+fn load_int(
+    stack: &mut Vec<Value>,
+    locals: &[Value],
     initialized: &[bool],
     index: usize,
     limit: usize,
@@ -777,33 +1232,74 @@ fn load(
     {
         return Err(VmError::new("local variable is not initialized"));
     }
-    push(
-        stack,
-        *locals
-            .get(index)
-            .ok_or_else(|| VmError::new("local index is out of range"))?,
-        limit,
-    )
+    let value = *locals
+        .get(index)
+        .ok_or_else(|| VmError::new("local index is out of range"))?;
+    match value {
+        Value::Int(_) => push(stack, value, limit),
+        Value::Ref(_) => Err(VmError::new("local variable is not an int")),
+    }
 }
 
-fn store(
-    stack: &mut Vec<i32>,
-    locals: &mut [i32],
+fn load_ref(
+    stack: &mut Vec<Value>,
+    locals: &[Value],
+    initialized: &[bool],
+    index: usize,
+    limit: usize,
+) -> Result<()> {
+    if !initialized
+        .get(index)
+        .copied()
+        .ok_or_else(|| VmError::new("local index is out of range"))?
+    {
+        return Err(VmError::new("local variable is not initialized"));
+    }
+    let value = *locals
+        .get(index)
+        .ok_or_else(|| VmError::new("local index is out of range"))?;
+    match value {
+        Value::Ref(_) => push(stack, value, limit),
+        Value::Int(_) => Err(VmError::new("local variable is not an object reference")),
+    }
+}
+
+fn store_int(
+    stack: &mut Vec<Value>,
+    locals: &mut [Value],
     initialized: &mut [bool],
     index: usize,
 ) -> Result<()> {
-    let value = pop(stack)?;
+    let value = pop_int(stack)?;
     *locals
         .get_mut(index)
-        .ok_or_else(|| VmError::new("local index is out of range"))? = value;
+        .ok_or_else(|| VmError::new("local index is out of range"))? = Value::Int(value);
     initialized[index] = true;
     Ok(())
 }
 
-fn binary(stack: &mut Vec<i32>, op: impl FnOnce(i32, i32) -> Result<i32>) -> Result<()> {
-    let right = pop(stack)?;
-    let left = pop(stack)?;
-    stack.push(op(left, right)?);
+fn store_ref(
+    stack: &mut Vec<Value>,
+    locals: &mut [Value],
+    initialized: &mut [bool],
+    index: usize,
+) -> Result<()> {
+    let value = pop_ref(stack)?;
+    *locals
+        .get_mut(index)
+        .ok_or_else(|| VmError::new("local index is out of range"))? = Value::Ref(value);
+    initialized[index] = true;
+    Ok(())
+}
+
+fn binary(
+    stack: &mut Vec<Value>,
+    limit: usize,
+    op: impl FnOnce(i32, i32) -> Result<i32>,
+) -> Result<()> {
+    let right = pop_int(stack)?;
+    let left = pop_int(stack)?;
+    push(stack, Value::Int(op(left, right)?), limit)?;
     Ok(())
 }
 
@@ -897,9 +1393,9 @@ mod tests {
     #[test]
     fn rejects_bad_class_files_and_unsupported_instructions() {
         assert!(ClassFile::parse(&[0, 1, 2]).is_err());
-        let class = ClassFile::parse(&fixture(&[("call", "()I", &[0xbb, 0xac])])).unwrap();
+        let class = ClassFile::parse(&fixture(&[("call", "()I", &[0xba, 0, 0, 0xac])])).unwrap();
         let error = class.run_static_i32("call", "()I", &[], 10).unwrap_err();
-        assert!(error.to_string().contains("unsupported opcode 0xbb"));
+        assert!(error.to_string().contains("unsupported opcode 0xba"));
     }
 
     #[test]
@@ -1052,6 +1548,66 @@ mod tests {
     }
 
     #[test]
+    fn object_allocation_stops_at_the_runtime_limit() {
+        let mut runtime = Runtime::new();
+        runtime
+            .load_class(&fixture_named("fixture/Empty", &[]))
+            .unwrap();
+        for _ in 0..MAX_HEAP_OBJECTS {
+            runtime.allocate_object("fixture/Empty").unwrap();
+        }
+        assert_eq!(
+            runtime
+                .allocate_object("fixture/Empty")
+                .unwrap_err()
+                .to_string(),
+            "object count exceeds the 4096-object limit"
+        );
+    }
+
+    #[test]
+    fn object_field_storage_is_bounded() {
+        let large_names: Vec<String> = (0..=MAX_OBJECT_FIELDS)
+            .map(|index| format!("field{index}"))
+            .collect();
+        let large_fields: Vec<_> = large_names
+            .iter()
+            .map(|name| (name.as_str(), "I"))
+            .collect();
+        let mut too_wide = Runtime::new();
+        too_wide
+            .load_class(&fixture_with_fields("fixture/Wide", &large_fields))
+            .unwrap();
+        assert_eq!(
+            too_wide
+                .allocate_object("fixture/Wide")
+                .unwrap_err()
+                .to_string(),
+            "object field count exceeds the 4096-field limit"
+        );
+
+        let field_names: Vec<String> = (0..65).map(|index| format!("field{index}")).collect();
+        let fields: Vec<_> = field_names
+            .iter()
+            .map(|name| (name.as_str(), "I"))
+            .collect();
+        let mut too_many_slots = Runtime::new();
+        too_many_slots
+            .load_class(&fixture_with_fields("fixture/Wide", &fields))
+            .unwrap();
+        for _ in 0..(MAX_HEAP_FIELDS / fields.len()) {
+            too_many_slots.allocate_object("fixture/Wide").unwrap();
+        }
+        assert_eq!(
+            too_many_slots
+                .allocate_object("fixture/Wide")
+                .unwrap_err()
+                .to_string(),
+            "object field storage exceeds the 262144-field limit"
+        );
+    }
+
+    #[test]
     fn decodes_modified_utf8_null_and_supplementary_characters() {
         assert_eq!(decode_modified_utf8(&[0xc0, 0x80]).unwrap(), "\0");
         assert_eq!(
@@ -1091,6 +1647,19 @@ mod tests {
         methods: &[(&str, &str, &[u8])],
         with_handler: bool,
     ) -> Vec<u8> {
+        fixture_class_with_fields(class_name, methods, &[], with_handler)
+    }
+
+    fn fixture_with_fields(class_name: &str, fields: &[(&str, &str)]) -> Vec<u8> {
+        fixture_class_with_fields(class_name, &[], fields, false)
+    }
+
+    fn fixture_class_with_fields(
+        class_name: &str,
+        methods: &[(&str, &str, &[u8])],
+        fields: &[(&str, &str)],
+        with_handler: bool,
+    ) -> Vec<u8> {
         fn utf(pool: &mut Vec<Vec<u8>>, value: &str) -> u16 {
             let mut entry = vec![1];
             entry.extend((value.len() as u16).to_be_bytes());
@@ -1109,6 +1678,10 @@ mod tests {
         let this = class(&mut pool, class_name);
         let parent = class(&mut pool, "java/lang/Object");
         let code_name = utf(&mut pool, "Code");
+        let field_specs: Vec<_> = fields
+            .iter()
+            .map(|(name, descriptor)| (utf(&mut pool, name), utf(&mut pool, descriptor)))
+            .collect();
         let specs: Vec<_> = methods
             .iter()
             .map(|(name, descriptor, code)| {
@@ -1124,7 +1697,14 @@ mod tests {
         out.extend([0, 0x21]);
         out.extend(this.to_be_bytes());
         out.extend(parent.to_be_bytes());
-        out.extend([0, 0, 0, 0]); // interfaces and fields
+        out.extend([0, 0]); // no interfaces
+        out.extend((field_specs.len() as u16).to_be_bytes());
+        for (name, descriptor) in field_specs {
+            out.extend([0, 1]); // public instance field
+            out.extend(name.to_be_bytes());
+            out.extend(descriptor.to_be_bytes());
+            out.extend([0, 0]); // no field attributes
+        }
         out.extend((specs.len() as u16).to_be_bytes());
         for (name, descriptor, code) in specs {
             out.extend([0, 9]); // public static

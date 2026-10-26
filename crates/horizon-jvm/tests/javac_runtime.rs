@@ -29,6 +29,7 @@ public class IntProgram {
         System.out.println(score(Integer.parseInt(args[0]), Integer.parseInt(args[1])));
     }
 }
+
 "#,
     )
     .unwrap();
@@ -128,6 +129,163 @@ public class Helper {
             .unwrap_err()
             .to_string(),
         "method not found: Helper.scale(II)I"
+    );
+}
+
+#[test]
+fn matches_javac_objects_fields_and_instance_calls_when_a_jdk_is_available() {
+    let Some((javac, java)) = java_tools() else {
+        eprintln!("skipping: set JAVA_HOME to run the javac comparison");
+        return;
+    };
+    let dir = TempDir::new();
+    let box_source = dir.0.join("Box.java");
+    let program_source = dir.0.join("ObjectProgram.java");
+    fs::write(
+        &box_source,
+        r#"
+public class Box {
+    public int value;
+
+    public Box() {
+    }
+
+    public Box(int initial) {
+        this.value = initial;
+    }
+
+    public int add(int amount) {
+        return this.value + amount;
+    }
+}
+"#,
+    )
+    .unwrap();
+    fs::write(
+        &program_source,
+        r#"
+public class ObjectProgram {
+    public static int exercise(int initial, int amount) {
+        Box box = new Box(initial);
+        box.value += 3;
+        return box.add(amount);
+    }
+
+    public static int nullCall() {
+        Box box = null;
+        return box.add(1);
+    }
+
+    public static int nullField() {
+        Box box = null;
+        return box.value;
+    }
+
+    public static int defaultValue() {
+        Box box = new Box();
+        return box.value;
+    }
+
+    public static void main(String[] args) {
+        if (args.length == 0) {
+            System.out.println(defaultValue());
+        } else {
+            System.out.println(exercise(Integer.parseInt(args[0]), Integer.parseInt(args[1])));
+        }
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    let compiled = Command::new(&javac)
+        .arg("-g:none")
+        .arg("-d")
+        .arg(&dir.0)
+        .arg(&box_source)
+        .arg(&program_source)
+        .output()
+        .expect("run javac");
+    assert!(
+        compiled.status.success(),
+        "javac failed: {}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+
+    let mut runtime = Runtime::new();
+    runtime
+        .load_class(&fs::read(dir.0.join("ObjectProgram.class")).unwrap())
+        .unwrap();
+    runtime
+        .load_class(&fs::read(dir.0.join("Box.class")).unwrap())
+        .unwrap();
+    for (initial, amount) in [(2, 6), (-9, 2), (i32::MAX, 1)] {
+        let expected = Command::new(&java)
+            .arg("-cp")
+            .arg(&dir.0)
+            .arg("ObjectProgram")
+            .arg(initial.to_string())
+            .arg(amount.to_string())
+            .output()
+            .expect("run Java object fixture");
+        assert!(
+            expected.status.success(),
+            "Java fixture failed: {}",
+            String::from_utf8_lossy(&expected.stderr)
+        );
+        let expected: i32 = String::from_utf8(expected.stdout)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let actual = runtime
+            .run_static_i32(
+                "ObjectProgram",
+                "exercise",
+                "(II)I",
+                &[initial, amount],
+                100,
+            )
+            .unwrap();
+        assert_eq!(actual, expected, "exercise({initial}, {amount})");
+    }
+
+    let expected = Command::new(&java)
+        .arg("-cp")
+        .arg(&dir.0)
+        .arg("ObjectProgram")
+        .output()
+        .expect("run Java default-field fixture");
+    assert!(
+        expected.status.success(),
+        "Java fixture failed: {}",
+        String::from_utf8_lossy(&expected.stderr)
+    );
+    let expected: i32 = String::from_utf8(expected.stdout)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    assert_eq!(
+        runtime
+            .run_static_i32("ObjectProgram", "defaultValue", "()I", &[], 100)
+            .unwrap(),
+        expected
+    );
+
+    assert_eq!(
+        runtime
+            .run_static_i32("ObjectProgram", "nullCall", "()I", &[], 100)
+            .unwrap_err()
+            .to_string(),
+        "null object reference at method call"
+    );
+    assert_eq!(
+        runtime
+            .run_static_i32("ObjectProgram", "nullField", "()I", &[], 100)
+            .unwrap_err()
+            .to_string(),
+        "null object reference at field access"
     );
 }
 

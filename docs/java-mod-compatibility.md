@@ -2,7 +2,9 @@
 
 Minecraft: Rust Edition is a Rust game. A Fabric JAR is not a data pack: its metadata names Java entrypoints, and its code can register callbacks or change Minecraft classes with Mixins. The current mod system runs Minecraft: Rust Edition's WebAssembly components. The pack importer can carry over supported data and assets, but it does not run Java code. Its class scan in `crates/horizon-port-pack/src/classes.rs` reads class names and method names to inventory a mod; it does not interpret methods.
 
-The new `horizon-jvm` crate is a first runtime building block. It can load up to 1,024 class files (128 MiB total) when a caller supplies their bytes, then run static methods with Java `int` arguments and results. Its small instruction set includes integer arithmetic, branches, and `invokestatic` calls between loaded classes. It checks instruction boundaries and local-variable use, rejects bytecode it does not understand, caps each run at ten million instructions, and caps nested calls at 64 frames. It rejects methods with Java exception handlers and classes with initialization code or a custom superclass. The reader is not a full JVM class verifier. It is not connected to the game or mod loader. It does not load a Fabric mod, call a Fabric entrypoint, create Java objects, dispatch virtual methods, implement a Minecraft Java API, apply Mixins, or claim compatibility with any mod.
+The `horizon-jvm` crate is a first runtime building block. A caller supplies class bytes; the crate loads up to 1,024 classes and 128 MiB total. A test can run a public static method that takes and returns Java `int` values. That method can create up to 4,096 simple objects. Each object can hold up to 4,096 `int` fields, with a total heap cap of 262,144 fields. The runtime supports constructors, `getfield`, `putfield`, `invokevirtual`, `invokespecial`, and `invokestatic` for the small set of int-only methods it understands. References use internal handles, and null field or method access returns a clear error.
+
+The instruction set also includes integer arithmetic and branches. It checks instruction boundaries and local-variable use, rejects bytecode it does not understand, caps each run at ten million instructions, and caps nested calls at 64 frames. It rejects classes with initialization code or a custom superclass, and only allocates concrete classes whose instance fields are all `int`. The reader is not a full JVM class verifier. It is not connected to the game or mod loader. It does not load a Fabric mod, call a Fabric entrypoint, support arrays or interface dispatch, implement a Minecraft Java API, apply Mixins, or claim compatibility with any mod.
 
 ## What a full runtime needs
 
@@ -11,14 +13,14 @@ The [JVM specification](https://docs.oracle.com/javase/specs/jvms/se25/html/) de
 A practical implementation would need these layers, with compatibility measured at each one:
 
 1. Read modern class files, method descriptors, fields, annotations, stack maps and bytecode safely.
-2. Verify classes, resolve inheritance and interfaces, create objects and arrays, and implement method dispatch and Java exceptions.
+2. Verify classes, resolve inheritance and interfaces, add arrays and interface dispatch, and implement Java exceptions. The current object support is a small slice with no inheritance.
 3. Provide enough Java library behavior for real mod dependencies, including lambdas and string concatenation through `invokedynamic`, resources, threads and reflection where needed.
 4. Read Fabric metadata, resolve versions and dependencies, find nested JARs and run entrypoints in the correct client or server order.
 5. Provide the Minecraft and Fabric APIs that mod code calls, translating their behavior to Minecraft: Rust Edition's game APIs.
 6. Transform classes in the right order for Mixins, access wideners, mapping names and other declared transformations.
 7. Add isolation, resource limits and failure handling. A Java mod is executable code, so parsing safely is not enough to make running it safe.
 
-This step now proves that Rust can load a bounded set of class files and follow static calls between them. The next major class-runtime pieces are object creation, constructors, instance fields and methods, interface dispatch, and class initialization. Fabric still needs the loader, transformations, and host APIs listed above before any installed mod can run.
+This step now proves that Rust can load a bounded set of class files, follow static calls, and run a tiny Java-made example that creates an object, writes and reads an int field, and calls an instance method. The next major pieces are class verification, inherited classes and interface dispatch, arrays, exceptions, and class initialization. Fabric still needs the loader, transformations, and host APIs listed above before any installed mod can run.
 
 ## Try the first slice
 
@@ -28,4 +30,4 @@ This step now proves that Rust can load a bounded set of class files and follow 
 cargo test --manifest-path crates/horizon-jvm/Cargo.toml
 ```
 
-Its tests build tiny class-file fixtures in Rust and check parsing, integer arithmetic, branches, stack errors, unsupported instructions, malformed branch targets, missing classes and methods, and the call-depth limit. An optional test uses `javac` to build two small original Java classes, checks cross-class calls against Java results, and checks missing-class and missing-method errors when `JAVA_HOME` points to a working JDK. Temporary `.class` files are removed after the test. This is not a Fabric integration test.
+Its tests build tiny class-file fixtures in Rust and check parsing, integer arithmetic, branches, stack errors, unsupported instructions, malformed branch targets, class and object limits, and the call-depth limit. Optional tests use `javac` to build small original Java classes, compare static and object-based results with Java, and check missing-class, missing-method, and null-reference errors when `JAVA_HOME` points to a working JDK. Temporary `.class` files are removed after each test. This is not a Fabric integration test.
