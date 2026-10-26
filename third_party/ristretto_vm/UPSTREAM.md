@@ -40,6 +40,14 @@ changes only that `-1` result to the saved OS error. This lets Java report a mis
 correctly while it builds nested directories. Registered application callbacks still take
 precedence over this wrapper.
 
+For Java versions newer than 11, the VM also wraps `Unsafe.compareAndSetReference`. Upstream masks static-field
+offsets but then treats the `Class` mirror as an ordinary object, so the CAS can report success
+without changing the static field. The local wrapper routes masked offsets to an atomic static
+reference update that compares object identity and writes under the same lock. Instance and array
+cases still use the upstream path. There is no mirror-to-class reverse lookup yet, so the wrapper
+resolves the owner through the active caller's loader and checks the exact mirror before writing;
+it fails closed if that lookup returns a same-named class from another loader.
+
 The local patch also adds optional caller-owned state to VM configuration. Native callbacks
 can read it through their thread's VM. The adapter clears this state when it is dropped;
 a callback that already holds its own `Arc` can finish safely. This does not stop Ristretto's

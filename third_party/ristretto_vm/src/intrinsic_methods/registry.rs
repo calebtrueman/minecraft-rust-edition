@@ -61,6 +61,12 @@ impl MethodRegistry {
             "jdk/internal/reflect/Reflection.getCallerClass()Ljava/lang/Class;".to_string(),
             IntrinsicMethod::Async(super::jmod_reflection::get_caller_class),
         );
+        if version.major() > 55 {
+            overrides.insert(
+                "jdk/internal/misc/Unsafe.compareAndSetReference(Ljava/lang/Object;JLjava/lang/Object;Ljava/lang/Object;)Z".to_string(),
+                IntrinsicMethod::Async(super::reference_cas::compare_and_set_reference),
+            );
+        }
         #[cfg(target_family = "unix")]
         if version.major() >= 65 {
             overrides.insert(

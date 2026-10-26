@@ -20,6 +20,16 @@ stay separate and that dropping the adapter releases its state. Dropping the ada
 stop Ristretto's Java threads. Another Java comparison checks folder creation with missing
 parents, existing files, and linked folders on Unix hosts.
 
+A small original JAR also checks Java's service lookup: `ServiceLoader` finds its declared
+provider and `Provider.get()` creates it. The result matches Java 25 with only `java.base`
+enabled. Services supplied by other JDK modules are outside this small test home's scope.
+
+A Java 25 comparison also covers reference updates made while a class is starting up.
+The patched runtime writes to the class's static field, checks object identity, and holds
+one lock across the comparison and write. The test checks successful and rejected updates,
+null values, and one-time class initialization. If the runtime resolves a different class
+with the same name, it rejects the update; support for that separate-loader case remains open.
+
 This proves that Ristretto can run these supplied Java classes and call a registered Rust function. The game and loader do not use this crate yet. It does not load a Fabric JAR, call a Fabric entrypoint, provide Minecraft or Fabric classes, apply Mixins, or make any installed mod compatible.
 
 ## Next step toward a game bridge

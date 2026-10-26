@@ -1,4 +1,4 @@
-use crate::Error::{FieldNotFound, InternalError, MethodNotFound, PoisonedLock};
+use crate::Error::{FieldNotFound, InternalError, InvalidValueType, MethodNotFound, PoisonedLock};
 use crate::field::FieldKey;
 use crate::{ClassLoader, Field, Method, Result, Value};
 use ahash::AHashMap;
@@ -1273,6 +1273,49 @@ impl Class {
             .map_err(|error| PoisonedLock(error.to_string()))?;
         *value_guard = value;
         Ok(())
+    }
+
+    /// Compare and replace a static reference by object identity while holding its storage lock.
+    ///
+    /// This is used by reference CAS operations so the comparison and write cannot race with
+    /// another access to the same static field.
+    ///
+    /// # Errors
+    ///
+    /// if the field cannot be found, the new value has the wrong type, or a lock is poisoned.
+    pub fn compare_and_set_static_reference<K: FieldKey>(
+        &self,
+        key: K,
+        expected: &Value,
+        new_value: Value,
+    ) -> Result<bool> {
+        if !matches!(expected, Value::Object(_)) {
+            return Err(InvalidValueType("Expected a reference value".to_string()));
+        }
+        if !matches!(&new_value, Value::Object(_)) {
+            return Err(InvalidValueType("Expected a reference value".to_string()));
+        }
+
+        let (field, value_lock) = self.static_field_value(key)?;
+        field.check_value(&new_value)?;
+        let mut current = value_lock
+            .write()
+            .map_err(|error| PoisonedLock(error.to_string()))?;
+
+        let matches = match (&*current, expected) {
+            (Value::Object(Some(actual)), Value::Object(Some(expected))) => actual.ptr_eq(expected),
+            (Value::Object(None), Value::Object(None)) => true,
+            (Value::Object(_), Value::Object(_)) => false,
+            _ => {
+                return Err(InvalidValueType(
+                    "Expected a static reference field".to_string(),
+                ));
+            }
+        };
+        if matches {
+            *current = new_value;
+        }
+        Ok(matches)
     }
 
     /// Set a static field value without checking field constraints.

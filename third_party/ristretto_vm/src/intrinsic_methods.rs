@@ -7,6 +7,8 @@
 mod intrinsics;
 /// Reflection shims for JMOD-only Java homes.
 mod jmod_reflection;
+/// Correct reference compare-and-set for static fields.
+mod reference_cas;
 /// Registry for storing and retrieving intrinsic method implementations
 mod registry;
 /// Corrects the Java 21+ Unix `access0` return value.
