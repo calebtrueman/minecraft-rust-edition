@@ -250,6 +250,8 @@ fn reads_mod_fields_and_follows_nested_jars_once_by_content() {
         .unwrap();
     assert_eq!(dependency.kind, DependencyKind::Depends);
     assert_eq!(dependency.candidates_in_scan, ["2.0.0"]);
+    assert_eq!(dependency.matching_candidates_in_scan, ["2.0.0"]);
+    assert_eq!(dependency.version_match_error, None);
     assert!(report.mod_id_conflicts.is_empty());
 }
 

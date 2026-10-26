@@ -11,6 +11,10 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use zip::ZipArchive;
 
+pub mod version_predicate;
+
+use version_predicate::matching_versions;
+
 const MANIFEST: &str = "fabric.mod.json";
 
 /// Limits for one scan. Defaults allow ordinary large mod sets while bounding archive work.
@@ -131,8 +135,12 @@ pub struct DependencyFact {
     pub kind: DependencyKind,
     /// Kept as JSON because Fabric supports more than one requirement shape.
     pub requirement: Value,
-    /// Versions with this ID in the scanned JARs. Requirements are not matched against them.
+    /// Versions with this ID in the scanned JARs.
     pub candidates_in_scan: Vec<String>,
+    /// Scanned versions that satisfy the declaration, when the declaration is valid.
+    pub matching_candidates_in_scan: Vec<String>,
+    /// Why matching was unavailable when the declaration was malformed.
+    pub version_match_error: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -1300,12 +1308,19 @@ fn rebuild_facts(report: &mut InspectionReport) {
                     .collect::<Vec<_>>();
                 candidates_in_scan.sort();
                 candidates_in_scan.dedup();
+                let (matching_candidates_in_scan, version_match_error) =
+                    match matching_versions(requirement, &candidates_in_scan) {
+                        Ok(matches) => (matches, None),
+                        Err(error) => (Vec::new(), Some(error.to_string())),
+                    };
                 facts.push(DependencyFact {
                     from_mod: module.id.clone(),
                     dependency_id: dependency_id.clone(),
                     kind,
                     requirement: requirement.clone(),
                     candidates_in_scan,
+                    matching_candidates_in_scan,
+                    version_match_error,
                 });
             }
         }
