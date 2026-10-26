@@ -1,0 +1,12 @@
+[package]
+name = "horizon-jvm"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+rust-version = "1.85"
+description = "An early, deliberately small Java class-file reader and bytecode interpreter for Minecraft: Rust Edition"
+
+[workspace]
+
+[lints.rust]
+unsafe_code = "forbid"
