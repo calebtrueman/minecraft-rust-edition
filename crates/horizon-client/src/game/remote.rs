@@ -4640,34 +4640,53 @@ impl Game<'_> {
             _ => Ok(false),
         }
     }
-    /// ClientPacketListener.sendChat / sendCommand (unsigned). The Chat
-    /// option's Hidden and System levels keep chat out and Hidden keeps the
-    /// commands out (ChatAbilities).
+    /// ClientPacketListener.sendChat / sendCommand. The Chat option's Hidden
+    /// and System levels keep chat out and Hidden keeps commands out.
     pub(super) fn send_chat(&mut self, message: &str) {
+        let _ = self.send_chat_with_evidence(message);
+    }
+
+    /// Like `send_chat`, with a small result the headless network harness can
+    /// report. Normal chat callers ignore this; it does not change the packet.
+    pub(super) fn send_chat_with_evidence(&mut self, message: &str) -> Option<ChatSendEvidence> {
         let message = message.trim();
         if message.is_empty() || !self.chat_abilities().allows(message) {
-            return;
+            return None;
         }
         if let Some(command) = message.strip_prefix('/') {
-            self.send(S::ChatCommand(play::ChatCommand {
-                command: command.to_owned(),
-            }));
+            let arguments = self.remote_signable_arguments(command);
+            let argument_names = arguments.iter().map(|(name, _)| name.clone()).collect();
+            let (signed_arguments, last_seen_offset) = self
+                .remote
+                .as_ref()?
+                .session
+                .send_chat_command(command, &arguments);
+            Some(ChatSendEvidence::Command {
+                argument_names,
+                signed_arguments,
+                last_seen_offset,
+            })
         } else {
-            let timestamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_millis() as i64);
-            self.send(S::Chat(play::Chat {
-                message: message.chars().take(256).collect(),
-                timestamp,
-                salt: 0,
-                signature: None,
-                last_seen: play::LastSeenUpdate {
-                    offset: 0,
-                    acknowledged: [0; 3],
-                    checksum: 0,
-                },
-            }));
+            if let Some(remote) = &self.remote {
+                let message: String = message.chars().take(256).collect();
+                let (signed, last_seen_offset) = remote.session.send_chat_message(&message);
+                Some(ChatSendEvidence::Message {
+                    signed,
+                    last_seen_offset,
+                })
+            } else {
+                None
+            }
         }
+    }
+
+    /// The message arguments the server's command tree says must be signed.
+    /// The server uses the same parse shape when it checks a signed command.
+    fn remote_signable_arguments(&self, command: &str) -> Vec<(String, String)> {
+        let Some(dispatcher) = self.remote.as_ref().and_then(|r| r.commands.as_ref()) else {
+            return Vec::new();
+        };
+        signable_message_arguments(dispatcher, &self.ui.registries, command)
     }
     /// Minecraft.handleKeybinds, key.swapOffhand: the server swaps the hands
     /// (ServerboundPlayerActionPacket SWAP_ITEM_WITH_OFFHAND at BlockPos.ZERO, facing down) and
@@ -5589,9 +5608,67 @@ impl Remote {
     }
 }
 
+pub(super) enum ChatSendEvidence {
+    Message {
+        signed: bool,
+        last_seen_offset: i32,
+    },
+    Command {
+        argument_names: Vec<String>,
+        signed_arguments: usize,
+        last_seen_offset: Option<i32>,
+    },
+}
+
+fn signable_message_arguments(
+    dispatcher: &horizon_client::command::Dispatcher,
+    registries: &horizon_client::command::Registries,
+    command: &str,
+) -> Vec<(String, String)> {
+    use horizon_client::command::{ArgType, NodeKind};
+    let parsed = dispatcher.parse(command, registries);
+    let root = parsed.context.root;
+    let mut out = Vec::new();
+    let mut context = Some(&parsed.context);
+    while let Some(c) = context {
+        for &(node, (start, end)) in &c.nodes {
+            if let NodeKind::Argument {
+                ty: ArgType::Message,
+                name,
+            } = &dispatcher.nodes[node].kind
+                && let Some(text) = command.get(start..end)
+            {
+                out.push((name.clone(), text.to_owned()));
+            }
+        }
+        context = c.child.as_deref().filter(|child| child.root != root);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::Game;
+
+    #[test]
+    fn tell_command_exposes_only_its_message_argument_for_signing() {
+        let dispatcher = horizon_client::command::vanilla::game_dispatcher();
+        let registries = horizon_client::command::Registries {
+            players: vec!["Tester".into()],
+            ..Default::default()
+        };
+
+        let arguments = super::signable_message_arguments(
+            dispatcher,
+            &registries,
+            "tell Tester this is the signed self-message",
+        );
+
+        assert_eq!(
+            arguments,
+            vec![("message".into(), "this is the signed self-message".into())]
+        );
+    }
 
     #[test]
     fn placement_preview_checks_obstruction_without_changing_the_level() {

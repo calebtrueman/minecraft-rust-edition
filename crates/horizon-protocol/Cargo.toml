@@ -16,6 +16,8 @@ getrandom = "0.3"
 sha1 = "0.10"
 # Secure chat: SHA256withRSA message signatures.
 sha2 = "0.10"
+# Private-key operations for secure chat use ring's hardened RSA signer.
+ring = "0.17.14"
 
 # The name servers of Windows' network adapters, for Minecraft SRV redirects.
 [target.'cfg(windows)'.dependencies]
@@ -32,3 +34,6 @@ path = "examples/item_wire_probe.rs"
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+base64 = "0.22.1"

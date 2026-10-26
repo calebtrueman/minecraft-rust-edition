@@ -9,6 +9,13 @@ use std::{
     time::{Duration, SystemTime},
 };
 
+/// A short-lived profile certificate returned by Minecraft Services for
+/// signing secure chat. The private key stays in memory and is never logged.
+pub struct ProfileCertificate {
+    pub key: horizon_protocol::secure_chat::ProfileKey,
+    pub private_key: horizon_protocol::rsa::RsaSigningKey,
+}
+
 /// MinecraftServicesEnvironment.PROD.
 pub const DEFAULT_DISCOVERY: &str = "https://discovery.minecraftservices.com/minecraft/client";
 /// A session file older than this is refused: it can't be replayed later.
@@ -232,6 +239,98 @@ pub fn join_server(session: &AuthSession, server_hash: &str) -> Result<(), JoinE
     }
 }
 
+/// MinecraftServicesSessionService.getPlayerCertificates. Online-mode
+/// accounts can join without this certificate, but secure-profile servers
+/// require it before they accept signed chat.
+pub fn fetch_profile_certificate(session: &AuthSession) -> Result<ProfileCertificate, String> {
+    let doc = discovery().map_err(|_| "Minecraft Services did not answer".to_owned())?;
+    let url = endpoint(&doc, "player", "getCertificates")
+        .ok_or_else(|| "Minecraft Services did not provide a certificate URL".to_owned())?;
+    let response = agent()
+        .post(&url)
+        .set("Authorization", &format!("Bearer {}", session.access_token))
+        .set("Content-Type", "application/json; charset=utf-8")
+        .call()
+        .map_err(|error| match error {
+            ureq::Error::Status(401, _) => "Minecraft account session expired".to_owned(),
+            ureq::Error::Status(_, _) => {
+                "Minecraft Services refused the chat certificate".to_owned()
+            }
+            ureq::Error::Transport(_) => "Minecraft Services did not answer".to_owned(),
+        })?;
+    parse_profile_certificate(&response.into_string().unwrap_or_default())
+}
+
+fn parse_profile_certificate(body: &str) -> Result<ProfileCertificate, String> {
+    use base64::Engine;
+
+    let v: serde_json::Value = serde_json::from_str(body)
+        .map_err(|_| "Minecraft Services returned invalid certificate data".to_owned())?;
+    let field = |key: &str| {
+        v.get(key)
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "Minecraft Services returned incomplete certificate data".to_owned())
+    };
+    let private_text = v
+        .pointer("/keyPair/privateKey")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "Minecraft Services returned incomplete certificate data".to_owned())?;
+    let private_der = decode_pem(private_text)?;
+    let private_key = horizon_protocol::rsa::RsaSigningKey::from_der(&private_der)
+        .map_err(|_| "Minecraft Services returned an invalid chat private key".to_owned())?;
+    let private_public =
+        horizon_protocol::rsa::RsaPublicKey::from_der(&private_key.public_der())
+            .map_err(|_| "Minecraft Services returned an invalid chat private key".to_owned())?;
+    let public_text = v
+        .pointer("/keyPair/publicKey")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "Minecraft Services returned incomplete certificate data".to_owned())?;
+    let public_der = decode_pem(public_text)
+        .map_err(|_| "Minecraft Services returned an invalid chat public key".to_owned())?;
+    let public_key = horizon_protocol::rsa::RsaPublicKey::from_der(&public_der)
+        .map_err(|_| "Minecraft Services returned an invalid chat public key".to_owned())?;
+    if public_key != private_public {
+        return Err("Minecraft Services returned mismatched chat keys".into());
+    }
+    let expires_at = chrono::DateTime::parse_from_rfc3339(field("expiresAt")?)
+        .map_err(|_| "Minecraft Services returned an invalid key expiry".to_owned())?
+        .timestamp_millis();
+    if expires_at <= chrono::Utc::now().timestamp_millis() {
+        return Err("Minecraft Services returned an expired chat key".into());
+    }
+    // Authlib's KeyPairResponse field is annotated with the JSON name
+    // publicKeySignatureV2. Vanilla 26.3 expects those bytes in signature_v2.
+    let signature = base64::engine::general_purpose::STANDARD
+        .decode(field("publicKeySignatureV2")?)
+        .map_err(|_| "Minecraft Services returned an invalid key signature".to_owned())?;
+    if signature.is_empty() {
+        return Err("Minecraft Services returned an empty key signature".into());
+    }
+    Ok(ProfileCertificate {
+        key: horizon_protocol::secure_chat::ProfileKey {
+            expires_at,
+            key: public_key.to_der(),
+            signature,
+        },
+        private_key,
+    })
+}
+
+fn decode_pem(text: &str) -> Result<Vec<u8>, String> {
+    use base64::Engine;
+    let body: String = text
+        .lines()
+        .filter(|line| !line.trim().starts_with("-----"))
+        .map(str::trim)
+        .collect();
+    if body.is_empty() {
+        return Err("Minecraft Services returned an empty chat private key".into());
+    }
+    base64::engine::general_purpose::STANDARD
+        .decode(body)
+        .map_err(|_| "Minecraft Services returned an invalid chat private key".to_owned())
+}
+
 /// What the session service says about a player joining this server
 /// (MinecraftServicesSessionService.hasJoinedServer).
 #[derive(Clone, Debug, PartialEq)]
@@ -316,8 +415,48 @@ pub fn parse_joined(body: &str) -> Option<JoinedProfile> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine;
 
     const UUID: u128 = 0x069a79f444e94726a5befca90e38aaf5;
+
+    fn private_key_der() -> Vec<u8> {
+        use base64::Engine;
+        let encoded: String = include_str!("../../../tests/fixtures/secure_chat_test_key.b64")
+            .lines()
+            .filter(|line| !line.starts_with('#'))
+            .collect();
+        base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .unwrap()
+    }
+
+    fn certificate_response(
+        expires_at: &str,
+        public_der: &[u8],
+        key_signature: &[u8],
+    ) -> serde_json::Value {
+        use base64::Engine;
+        let private_der = private_key_der();
+        let private = format!(
+            "-----BEGIN RSA PRIVATE KEY-----\n{}\n-----END RSA PRIVATE KEY-----",
+            base64::engine::general_purpose::STANDARD.encode(private_der)
+        );
+        let public = format!(
+            "-----BEGIN RSA PUBLIC KEY-----\n{}\n-----END RSA PUBLIC KEY-----",
+            base64::engine::general_purpose::STANDARD.encode(public_der)
+        );
+        serde_json::json!({
+            "keyPair": { "privateKey": private, "publicKey": public },
+            "publicKeySignatureV2": base64::engine::general_purpose::STANDARD.encode(key_signature),
+            "expiresAt": expires_at,
+        })
+    }
+
+    fn fixture_public_der() -> Vec<u8> {
+        horizon_protocol::rsa::RsaSigningKey::from_der(&private_key_der())
+            .unwrap()
+            .public_der()
+    }
 
     fn write(dir: &Path, text: &str, mode: u32) -> std::path::PathBuf {
         let path = dir.join("session.json");
@@ -387,6 +526,121 @@ mod tests {
     }
 
     #[test]
+    fn profile_certificate_parser_keeps_the_private_key_in_a_hardened_signer() {
+        let key_signature = vec![7; 512];
+        let response = certificate_response(
+            "2099-12-31T23:59:59Z",
+            &fixture_public_der(),
+            &key_signature,
+        );
+        let certificate = parse_profile_certificate(&response.to_string()).unwrap();
+        let public = horizon_protocol::rsa::RsaPublicKey::from_der(&certificate.key.key).unwrap();
+        let signature = certificate
+            .private_key
+            .sign_sha256(b"profile key test")
+            .unwrap();
+        assert!(public.verify(
+            horizon_protocol::rsa::SignatureHash::Sha256,
+            b"profile key test",
+            &signature,
+        ));
+        assert_eq!(certificate.key.signature, key_signature);
+        assert_eq!(
+            format!("{:?}", certificate.private_key),
+            "RsaSigningKey(<hidden>)"
+        );
+    }
+
+    #[test]
+    fn profile_certificate_parser_rejects_expired_keys() {
+        let response = certificate_response("2000-01-01T00:00:00Z", &fixture_public_der(), &[1]);
+        let error = parse_profile_certificate(&response.to_string())
+            .err()
+            .unwrap();
+        assert!(error.contains("expired"));
+    }
+
+    #[test]
+    fn profile_certificate_parser_rejects_malformed_public_keys() {
+        let response = serde_json::json!({
+            "keyPair": {
+                "privateKey": "-----BEGIN RSA PRIVATE KEY-----\nnot-base64\n-----END RSA PRIVATE KEY-----",
+                "publicKey": "-----BEGIN RSA PUBLIC KEY-----\nnot-base64\n-----END RSA PUBLIC KEY-----",
+            },
+            "publicKeySignatureV2": "AQ==",
+            "expiresAt": "2099-12-31T23:59:59Z",
+        });
+        assert!(parse_profile_certificate(&response.to_string()).is_err());
+
+        let response = serde_json::json!({
+            "keyPair": {
+                "privateKey": format!(
+                    "-----BEGIN RSA PRIVATE KEY-----\n{}\n-----END RSA PRIVATE KEY-----",
+                    base64::engine::general_purpose::STANDARD.encode(private_key_der())
+                ),
+                "publicKey": "-----BEGIN RSA PUBLIC KEY-----\nnot-base64\n-----END RSA PUBLIC KEY-----",
+            },
+            "publicKeySignatureV2": "AQ==",
+            "expiresAt": "2099-12-31T23:59:59Z",
+        });
+        assert!(
+            parse_profile_certificate(&response.to_string())
+                .err()
+                .unwrap()
+                .contains("public key")
+        );
+    }
+
+    #[test]
+    fn profile_certificate_parser_rejects_mismatched_public_and_private_keys() {
+        let mut different =
+            horizon_protocol::rsa::RsaPublicKey::from_der(&fixture_public_der()).unwrap();
+        different.modulus[0] ^= 1;
+        let response = certificate_response("2099-12-31T23:59:59Z", &different.to_der(), &[1; 512]);
+        let error = parse_profile_certificate(&response.to_string())
+            .err()
+            .unwrap();
+        assert!(error.contains("mismatched"));
+    }
+
+    #[test]
+    fn profile_certificate_parser_rejects_malformed_or_empty_signatures() {
+        let mut response =
+            certificate_response("2099-12-31T23:59:59Z", &fixture_public_der(), &[1; 512]);
+        response["publicKeySignatureV2"] = serde_json::Value::String("not-base64".into());
+        assert!(
+            parse_profile_certificate(&response.to_string())
+                .err()
+                .unwrap()
+                .contains("signature")
+        );
+
+        response["publicKeySignatureV2"] = serde_json::Value::String(String::new());
+        assert!(
+            parse_profile_certificate(&response.to_string())
+                .err()
+                .unwrap()
+                .contains("empty key signature")
+        );
+    }
+
+    #[test]
+    fn profile_certificate_parser_requires_the_v2_signature_field() {
+        let mut response =
+            certificate_response("2099-12-31T23:59:59Z", &fixture_public_der(), &[1; 512]);
+        response["publicKeySignature"] = response["publicKeySignatureV2"].clone();
+        response
+            .as_object_mut()
+            .unwrap()
+            .remove("publicKeySignatureV2");
+
+        let error = parse_profile_certificate(&response.to_string())
+            .err()
+            .unwrap();
+        assert!(error.contains("incomplete certificate data"));
+    }
+
+    #[test]
     fn join_request_like_authlib() {
         let s = AuthSession::new("Notch", UUID, "tok");
         let v: serde_json::Value = serde_json::from_str(&join_request(&s, "-7c9d")).unwrap();
@@ -428,11 +682,16 @@ mod tests {
 
     #[test]
     fn discovery_endpoints() {
-        let doc = serde_json::json!({"discovery": {"session": {"endpoints": {"join": {"uri": "https://s/join"}}}}});
+        let doc = serde_json::json!({"discovery": {"session": {"endpoints": {"join": {"uri": "https://s/join"}}}, "player": {"endpoints": {"getCertificates": {"uri": "https://api.minecraftservices.com/player/certificates"}}}}});
         assert_eq!(
             endpoint(&doc, "session", "join").as_deref(),
             Some("https://s/join")
         );
         assert_eq!(endpoint(&doc, "session", "verify"), None);
+        assert_eq!(
+            endpoint(&doc, "player", "getCertificates").as_deref(),
+            Some("https://api.minecraftservices.com/player/certificates")
+        );
+        assert_eq!(endpoint(&doc, "player", "certificates"), None);
     }
 }

@@ -153,8 +153,8 @@ The connecting screen follows vanilla's states: "Connecting to the server..." un
 request, "Logging in..." while joining the session service, "Encrypting...", then "Joining world...".
 Code: `horizon-protocol` (`rsa.rs`, `crypto::server_hash`), `horizon-client` (`auth.rs`, `net.rs`).
 
-Minecraft: Rust Edition's own dedicated and LAN servers stay offline-mode (they don't verify
-players with the session service); that is separate work.
+The dedicated Rust server also supports account checks through `online-mode=true` in
+`server.properties`. Keep that setting separate from offline or LAN test profiles.
 
 `HORIZON_API_DISCOVERY` overrides the discovery URL, the counterpart of authlib's
 `-Dminecraft.api.discovery.host`; it is how the harness points both the vanilla server and
@@ -176,15 +176,18 @@ player renderer. Until a skin arrives the default skin for the UUID shows (as to
 profile certificate from Minecraft Services after an online login, without holding up world entry.
 It sends the chat session update after the server's play-login packet, signs player chat and each
 signable command message argument with SHA256withRSA, and tracks the rolling last-seen window. It
-sends a separate acknowledgement after every 20 signed messages when the player has not sent a chat
-packet in that time. RSA private-key signatures use `ring`; the account token and private key stay
+sends a separate acknowledgement when the pending offset exceeds 64. Outgoing chat and signed
+commands also carry acknowledgements and clear that offset. RSA private-key signatures use `ring`; the account token and private key stay
 in memory.
 
 If certificate lookup fails or the certificate expires, Minecraft: Rust Edition keeps the
 connection open and sends unsigned chat. Servers with secure-profile enforcement will refuse that
 chat. Commands without signable message arguments can still be sent without argument signatures.
-This flow has unit and network-packet coverage, but it has not been checked against a live account
-or public server.
+A local test with a real account against the unchanged Java 26.3 dedicated server passed
+encrypted login, 49 loaded chunks, signed chat and `/list`. A longer run also passed 25 signed
+messages with their acknowledgements and a signed `/tell` to the same player. The tests used `online-mode=true`
+and `enforce-secure-profile=true`. Public and modded servers, long sessions and account-key
+renewal during play still need broader checks.
 
 ## Harnesses
 
@@ -203,3 +206,9 @@ Rust unit tests: server hash vectors (Notch, jeb_, simon), RSA wrapping round tr
 X.509 key parsing, AES/CFB8 vectors (already in `horizon-protocol`), the session file (permissions,
 age, deletion), the error mapping. Launcher: the whole token chain against a local mock of the
 Microsoft, Xbox and Minecraft endpoints, and the keychain abstraction with an in-memory backend.
+
+For the optional longer local check, set `HORIZON_NET_SECURE_CHAT_COUNT=25`,
+`HORIZON_NET_SECURE_CHAT_INTERVAL_MS=1000` and `HORIZON_NET_REPORT` before starting the
+Rust client with `--server`. The report records signatures, echoed messages, receipt offsets
+and the signed self-command. Standalone receipt packets may be zero when outgoing messages
+already carry those receipts. The normal check stays unchanged when these options are absent.

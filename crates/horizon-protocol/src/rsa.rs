@@ -1,12 +1,9 @@
-//! RSA for the online-mode login: the server's X.509 public key
-//! (Crypt.byteToPublicKey) and PKCS#1 v1.5 encryption of the shared secret
-//! and challenge (Crypt.encryptUsingKey, Java's "RSA" cipher =
-//! RSA/ECB/PKCS1Padding), and on the server's side the key pair it makes at
-//! startup (Crypt.generateKeyPair: 1024 bits) and the decryption
-//! (Crypt.decryptUsingKey); and the PKCS#1 v1.5 signature checks of secure
-//! chat (SHA256withRSA for messages, SHA1withRSA for the services' profile
-//! key signatures). Modular exponentiation uses Montgomery multiplication on
-//! 32-bit limbs; RSA moduli are always odd.
+//! RSA for online-mode login and secure chat. This includes the server's
+//! X.509 public key, shared-secret encryption/decryption, server key
+//! generation, and PKCS#1 v1.5 signature checks (SHA256withRSA for chat
+//! messages, SHA1withRSA for profile-key certificates). Client private-key
+//! signing uses ring. The custom RSA arithmetic uses Montgomery
+//! multiplication on 32-bit limbs; RSA moduli are always odd.
 use crate::{Error, Result};
 
 /// A non-negative integer, little-endian 32-bit limbs.
@@ -260,6 +257,20 @@ impl RsaPublicKey {
     pub fn size(&self) -> usize {
         self.modulus.len()
     }
+
+    /// X509EncodedKeySpec: SubjectPublicKeyInfo containing this RSA key.
+    pub fn to_der(&self) -> Vec<u8> {
+        let key = der_element(
+            0x30,
+            &[der_integer(&self.modulus), der_integer(&self.exponent)].concat(),
+        );
+        let algorithm = der_element(
+            0x30,
+            &[der_element(0x06, RSA_ENCRYPTION), vec![0x05, 0x00]].concat(),
+        );
+        let bits = der_element(0x03, &[&[0u8][..], &key].concat());
+        der_element(0x30, &[algorithm, bits].concat())
+    }
     /// The raw RSA operation m^e mod n on a `size()`-byte block.
     fn apply(&self, block: &[u8], exponent: &[u8]) -> Vec<u8> {
         let limbs = self.size().div_ceil(4);
@@ -290,6 +301,52 @@ impl RsaPublicKey {
         }
         block[k - message.len()..].copy_from_slice(message);
         Ok(self.apply(&block, &self.exponent))
+    }
+}
+
+/// A profile private key used to sign player chat. Private-key operations use
+/// ring; the custom RSA code is used for public-key work and online-mode
+/// server keys.
+pub struct RsaSigningKey(ring::rsa::KeyPair);
+
+impl std::fmt::Debug for RsaSigningKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RsaSigningKey(<hidden>)")
+    }
+}
+
+impl RsaSigningKey {
+    /// Read a PKCS#1 or PKCS#8 RSA private key from Minecraft Services.
+    pub fn from_der(input: &[u8]) -> Result<Self> {
+        ring::rsa::KeyPair::from_der(input)
+            .or_else(|_| ring::rsa::KeyPair::from_pkcs8(input))
+            .map(Self)
+            .map_err(|_| Error::new("Malformed RSA signing key"))
+    }
+
+    /// The X.509 public key matching this private key.
+    pub fn public_der(&self) -> Vec<u8> {
+        let algorithm = der_element(
+            0x30,
+            &[der_element(0x06, RSA_ENCRYPTION), vec![0x05, 0x00]].concat(),
+        );
+        let bits = der_element(0x03, &[&[0], self.0.public().as_ref()].concat());
+        der_element(0x30, &[algorithm, bits].concat())
+    }
+
+    /// SHA256withRSA, the signature used for 26.3 chat messages.
+    pub fn sign_sha256(&self, message: &[u8]) -> Result<Vec<u8>> {
+        let rng = ring::rand::SystemRandom::new();
+        let mut signature = vec![0; self.0.public().modulus_len()];
+        self.0
+            .sign(
+                &ring::signature::RSA_PKCS1_SHA256,
+                &rng,
+                message,
+                &mut signature,
+            )
+            .map_err(|_| Error::new("RSA chat signature failed"))?;
+        Ok(signature)
     }
 }
 
@@ -506,20 +563,7 @@ impl RsaPrivateKey {
 
     /// PublicKey.getEncoded: X.509 SubjectPublicKeyInfo.
     pub fn public_der(&self) -> Vec<u8> {
-        let key = der_element(
-            0x30,
-            &[
-                der_integer(&self.public.modulus),
-                der_integer(&self.public.exponent),
-            ]
-            .concat(),
-        );
-        let algorithm = der_element(
-            0x30,
-            &[der_element(0x06, RSA_ENCRYPTION), vec![0x05, 0x00]].concat(),
-        );
-        let bits = der_element(0x03, &[&[0u8][..], &key].concat());
-        der_element(0x30, &[algorithm, bits].concat())
+        self.public.to_der()
     }
 
     /// Crypt.decryptUsingKey: RSAES-PKCS1-v1_5 decryption (RFC 8017 7.2.2).
@@ -545,6 +589,17 @@ impl RsaPrivateKey {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    pub(crate) fn signing_fixture() -> Vec<u8> {
+        use base64::Engine;
+        let encoded: String = include_str!("../../../tests/fixtures/secure_chat_test_key.b64")
+            .lines()
+            .filter(|line| !line.starts_with('#'))
+            .collect();
+        base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .unwrap()
+    }
 
     pub fn hex(s: &str) -> Vec<u8> {
         let s = if s.len() % 2 == 1 {
@@ -672,6 +727,18 @@ pub(crate) mod tests {
         assert!(!key.verify(SignatureHash::Sha256, b"hello", &flipped));
         assert!(!key.verify(SignatureHash::Sha256, b"hello", &signature[1..]));
         assert!(!key.verify(SignatureHash::Sha256, b"hello", &key.modulus));
+    }
+
+    #[test]
+    fn hardened_profile_signer_matches_sha256withrsa() {
+        let private = signing_fixture();
+        let signer = RsaSigningKey::from_der(&private).unwrap();
+        let public = RsaPublicKey::from_der(&signer.public_der()).unwrap();
+        let signature = signer.sign_sha256(b"hello").unwrap();
+        assert_eq!(signature.len(), public.size());
+        assert!(public.verify(SignatureHash::Sha256, b"hello", &signature));
+        assert!(!public.verify(SignatureHash::Sha256, b"wrong", &signature));
+        assert_eq!(format!("{signer:?}"), "RsaSigningKey(<hidden>)");
     }
 
     /// Signatures made here with the private exponent (EMSA-PKCS1-v1_5 by

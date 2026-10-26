@@ -1357,6 +1357,7 @@ version = "0.1.0"
 dependencies = [
  "ab_glyph",
  "arboard",
+ "base64",
  "bytemuck",
  "chrono",
  "cpal",
@@ -1503,11 +1504,13 @@ dependencies = [
 name = "horizon-protocol"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "flate2",
  "getrandom 0.3.4",
  "horizon-core",
  "horizon-world",
  "ipconfig",
+ "ring",
  "serde_json",
  "sha1",
  "sha2",

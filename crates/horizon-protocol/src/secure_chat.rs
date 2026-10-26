@@ -14,6 +14,9 @@ pub const SIGNATURE_BYTES: usize = 256;
 pub type Signature = [u8; SIGNATURE_BYTES];
 /// LastSeenMessages.LAST_SEEN_MESSAGES_MAX_LENGTH: the window a client acknowledges.
 pub const LAST_SEEN: usize = 20;
+/// ClientPacketListener sends a stand-alone ChatAck only when the pending
+/// offset is greater than 64; ordinary chat packets carry smaller offsets.
+const STANDALONE_ACK_THRESHOLD: i32 = 64;
 /// PlayerChatMessage.MESSAGE_EXPIRES_AFTER_SERVER, in milliseconds.
 pub const EXPIRES_AFTER_SERVER: i64 = 5 * 60 * 1000;
 
@@ -252,6 +255,217 @@ pub struct LastSeenValidator {
     last_pending: Option<Signature>,
 }
 
+/// The outgoing half of secure chat for a remote server connection. It owns
+/// the player's certificate key, message index, signature cache and the
+/// rolling acknowledgement window for messages received from that server.
+#[derive(Default)]
+pub struct ClientChat {
+    session: Option<ClientSession>,
+    signatures: SignatureCache,
+    last_seen: ClientLastSeen,
+    started: bool,
+}
+
+struct ClientSession {
+    id: u128,
+    profile: u128,
+    key: ProfileKey,
+    private_key: crate::rsa::RsaSigningKey,
+    next_index: i32,
+}
+
+impl ClientChat {
+    /// Install a certificate fetched over the Minecraft Services API and
+    /// return the packet the client must send before signing chat.
+    pub fn install(
+        &mut self,
+        profile: u128,
+        key: ProfileKey,
+        private_key: crate::rsa::RsaSigningKey,
+    ) -> crate::Result<Option<crate::packets::play::ChatSessionUpdate>> {
+        let mut bytes = [0u8; 16];
+        crate::crypto::random_bytes(&mut bytes)?;
+        bytes[6] = bytes[6] & 0x0f | 0x40;
+        bytes[8] = bytes[8] & 0x3f | 0x80;
+        let id = u128::from_be_bytes(bytes);
+        self.session = Some(ClientSession {
+            id,
+            profile,
+            key,
+            private_key,
+            next_index: 0,
+        });
+        Ok(self.session_update())
+    }
+
+    /// Mark the play login as received. Vanilla sends the profile key after
+    /// that packet; a certificate fetched later is sent by `install` instead.
+    pub fn start(&mut self) -> Option<crate::packets::play::ChatSessionUpdate> {
+        self.started = true;
+        self.session_update()
+    }
+
+    fn session_update(&self) -> Option<crate::packets::play::ChatSessionUpdate> {
+        if !self.started {
+            return None;
+        }
+        let session = self.session.as_ref()?;
+        Some(crate::packets::play::ChatSessionUpdate {
+            session: session.id,
+            expires_at: session.key.expires_at,
+            key: session.key.key.clone(),
+            key_signature: session.key.signature.clone(),
+        })
+    }
+
+    /// Resolve a player-chat packet's packed references against the cache,
+    /// remember its signature, and request a stand-alone ChatAck only after
+    /// more than 64 signed messages await a packet that can carry an update.
+    pub fn receive(
+        &mut self,
+        packed_last_seen: &[(i32, Option<Vec<u8>>)],
+        signature_bytes: Option<&[u8]>,
+    ) -> Option<i32> {
+        let last_seen: Vec<_> = packed_last_seen
+            .iter()
+            .filter_map(|(index, full)| self.signatures.unpack(*index, full.as_deref()))
+            .collect();
+        let signature = signature_bytes.and_then(signature);
+        if let Some(signature) = &signature {
+            self.signatures.push(&last_seen, Some(signature));
+        }
+        signature.and_then(|signature| self.last_seen.received(signature))
+    }
+
+    /// Sign one player message when a current profile certificate is
+    /// installed. `None` means the caller should use the unsigned packet.
+    pub fn sign_chat(
+        &mut self,
+        content: &str,
+        timestamp: i64,
+        salt: i64,
+    ) -> crate::Result<Option<Vec<u8>>> {
+        let Some(session) = self.session.as_mut() else {
+            return Ok(None);
+        };
+        if session.key.has_expired(timestamp) {
+            return Ok(None);
+        }
+        let last_seen = self.last_seen.signatures();
+        let body = Body {
+            content,
+            timestamp,
+            salt,
+            last_seen: &last_seen,
+        };
+        let payload = signed_payload(session.profile, session.id, session.next_index, &body);
+        let signature = session.private_key.sign_sha256(&payload)?;
+        session.next_index = session
+            .next_index
+            .checked_add(1)
+            .ok_or_else(|| crate::Error::new("Secure chat message chain is full"))?;
+        Ok(Some(signature))
+    }
+
+    /// Sign each command message argument with one shared timestamp, salt and
+    /// last-seen list. An empty result is valid for commands without such args.
+    pub fn sign_command_arguments(
+        &mut self,
+        arguments: &[(String, String)],
+        timestamp: i64,
+        salt: i64,
+    ) -> crate::Result<Option<Vec<(String, Vec<u8>)>>> {
+        let Some(session) = self.session.as_mut() else {
+            return Ok(None);
+        };
+        if session.key.has_expired(timestamp) || arguments.len() > 8 {
+            return Ok(None);
+        }
+        let last_seen = self.last_seen.signatures();
+        let mut signatures = Vec::with_capacity(arguments.len());
+        for (name, content) in arguments {
+            let body = Body {
+                content,
+                timestamp,
+                salt,
+                last_seen: &last_seen,
+            };
+            let payload = signed_payload(session.profile, session.id, session.next_index, &body);
+            signatures.push((name.clone(), session.private_key.sign_sha256(&payload)?));
+            session.next_index = session
+                .next_index
+                .checked_add(1)
+                .ok_or_else(|| crate::Error::new("Secure chat message chain is full"))?;
+        }
+        Ok(Some(signatures))
+    }
+
+    /// The last-seen list covered by a signed body.
+    pub fn last_seen_signatures(&self) -> Vec<Signature> {
+        self.last_seen.signatures()
+    }
+
+    /// Acknowledgement data to attach to the next chat or command packet.
+    pub fn last_seen_update(&mut self) -> crate::packets::play::LastSeenUpdate {
+        self.last_seen.update()
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ClientLastSeen {
+    window: VecDeque<Option<Signature>>,
+    /// Signed messages since the last acknowledgement update.
+    offset: i32,
+    last_pending: Option<Signature>,
+}
+
+impl Default for ClientLastSeen {
+    fn default() -> Self {
+        Self {
+            window: std::iter::repeat_n(None, LAST_SEEN).collect(),
+            offset: 0,
+            last_pending: None,
+        }
+    }
+}
+
+impl ClientLastSeen {
+    fn signatures(&self) -> Vec<Signature> {
+        self.window.iter().filter_map(|entry| *entry).collect()
+    }
+
+    fn received(&mut self, signature: Signature) -> Option<i32> {
+        if self.last_pending.as_ref() == Some(&signature) {
+            return None;
+        }
+        self.window.pop_front();
+        self.window.push_back(Some(signature));
+        self.last_pending = Some(signature);
+        self.offset = self.offset.saturating_add(1);
+        if self.offset <= STANDALONE_ACK_THRESHOLD {
+            return None;
+        }
+        let offset = std::mem::take(&mut self.offset);
+        Some(offset)
+    }
+
+    fn update(&mut self) -> crate::packets::play::LastSeenUpdate {
+        let mut acknowledged = [0; 3];
+        let mut seen = Vec::new();
+        for (i, entry) in self.window.iter().enumerate() {
+            if let Some(signature) = entry {
+                acknowledged[i / 8] |= 1 << (i % 8);
+                seen.push(*signature);
+            }
+        }
+        crate::packets::play::LastSeenUpdate {
+            offset: std::mem::take(&mut self.offset),
+            acknowledged,
+            checksum: checksum(&seen),
+        }
+    }
+}
+
 impl Default for LastSeenValidator {
     fn default() -> Self {
         Self {
@@ -346,6 +560,18 @@ impl Default for SignatureCache {
 }
 
 impl SignatureCache {
+    /// Resolve a packed signature from the cache or its full bytes.
+    pub fn unpack(&self, index: i32, full: Option<&[u8]>) -> Option<Signature> {
+        if index == -1 {
+            signature(full?)
+        } else {
+            self.entries
+                .get(usize::try_from(index).ok()?)
+                .copied()
+                .flatten()
+        }
+    }
+
     /// MessageSignature.pack: the cache index, or the full signature.
     pub fn pack(&self, signature: &Signature) -> (i32, Option<Vec<u8>>) {
         match self
@@ -445,6 +671,20 @@ mod tests {
     }
 
     #[test]
+    fn profile_certificate_payload_includes_uuid_expiry_and_der_key() {
+        let profile = 0x069a_79f4_44e9_4726_a5be_fca9_0e38_aaf5;
+        let key = ProfileKey {
+            expires_at: 1_700_000_123_456,
+            key: vec![1, 2, 3],
+            signature: Vec::new(),
+        };
+        let payload = key.signed_payload(profile);
+        assert_eq!(&payload[..16], &profile.to_be_bytes());
+        assert_eq!(&payload[16..24], &key.expires_at.to_be_bytes());
+        assert_eq!(&payload[24..], &key.key);
+    }
+
+    #[test]
     fn last_seen_window() {
         let mut v = LastSeenValidator::default();
         assert_eq!(v.tracked_count(), 20);
@@ -487,5 +727,126 @@ mod tests {
             [c.pack(&sig(3)).0, c.pack(&sig(2)).0, c.pack(&sig(1)).0],
             [0, 1, 2]
         );
+    }
+
+    #[test]
+    fn client_resolves_packed_prior_signatures_before_advancing_cache() {
+        let mut client = ClientChat::default();
+        let first = sig(11);
+        let second = sig(22);
+
+        assert_eq!(client.receive(&[], Some(&first)), None);
+        assert_eq!(client.signatures.unpack(0, None), Some(first));
+
+        assert_eq!(client.receive(&[(0, None)], Some(&second)), None);
+        assert_eq!(client.signatures.unpack(0, None), Some(second));
+        assert_eq!(client.signatures.unpack(1, None), Some(first));
+        assert_eq!(client.last_seen_signatures(), vec![first, second]);
+
+        let update = client.last_seen_update();
+        assert_eq!(update.offset, 2);
+        assert_eq!(update.acknowledged, [0, 0, 0b0000_1100]);
+        assert_eq!(update.checksum, checksum(&[first, second]));
+    }
+
+    #[test]
+    fn client_rolls_acknowledgements_forward_and_keeps_the_last_twenty() {
+        let mut client = ClientChat::default();
+        let mut server = LastSeenValidator::default();
+        for n in 1..=25u8 {
+            let signature = sig(n);
+            server.add_pending(&signature);
+            let ack = client.receive(&[], Some(&signature));
+            assert_eq!(ack, None, "chat packets can carry this update");
+            if let Some(offset) = ack {
+                server.apply_offset(offset).unwrap();
+            }
+        }
+
+        let update = client.last_seen_update();
+        let seen = server
+            .apply_update(update.offset, update.acknowledged, update.checksum)
+            .unwrap();
+        assert_eq!(seen, (6..=25).map(sig).collect::<Vec<_>>());
+        assert_eq!(server.tracked_count(), LAST_SEEN);
+    }
+
+    #[test]
+    fn client_chat_signs_messages_in_one_session_chain() {
+        let private_der = crate::rsa::tests::signing_fixture();
+        let key = crate::rsa::RsaSigningKey::from_der(&private_der).unwrap();
+        let public_der = key.public_der();
+        let public = RsaPublicKey::from_der(&public_der).unwrap();
+        let expires_at = 2_000_000_000_000;
+        let mut client = ClientChat::default();
+        assert!(
+            client
+                .install(
+                    7,
+                    ProfileKey {
+                        expires_at,
+                        key: public_der.clone(),
+                        signature: vec![1],
+                    },
+                    key,
+                )
+                .unwrap()
+                .is_none()
+        );
+        let update = client.start().unwrap();
+        let timestamp = 1_700_000_000_123;
+        let signature = client.sign_chat("hello", timestamp, 9).unwrap().unwrap();
+        let body = Body {
+            content: "hello",
+            timestamp,
+            salt: 9,
+            last_seen: &[],
+        };
+        assert!(public.verify(
+            SignatureHash::Sha256,
+            &signed_payload(7, update.session, 0, &body),
+            &signature,
+        ));
+        assert_eq!(update.expires_at, expires_at);
+        assert_eq!(update.key, public_der);
+        assert_eq!(update.key_signature, vec![1]);
+
+        let second_timestamp = timestamp + 1;
+        let second = client
+            .sign_chat("again", second_timestamp, 10)
+            .unwrap()
+            .unwrap();
+        let second_body = Body {
+            content: "again",
+            timestamp: second_timestamp,
+            salt: 10,
+            last_seen: &[],
+        };
+        assert!(public.verify(
+            SignatureHash::Sha256,
+            &signed_payload(7, update.session, 1, &second_body),
+            &second,
+        ));
+        let command_timestamp = second_timestamp + 1;
+        let command = client
+            .sign_command_arguments(
+                &[("message".into(), "go now".into())],
+                command_timestamp,
+                11,
+            )
+            .unwrap()
+            .unwrap();
+        let command_body = Body {
+            content: "go now",
+            timestamp: command_timestamp,
+            salt: 11,
+            last_seen: &[],
+        };
+        assert_eq!(command[0].0, "message");
+        assert!(public.verify(
+            SignatureHash::Sha256,
+            &signed_payload(7, update.session, 2, &command_body),
+            &command[0].1,
+        ));
     }
 }

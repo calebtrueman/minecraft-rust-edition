@@ -823,9 +823,9 @@ fn login_and_configure(
             _ => {}
         }
     };
-    // A Horizon client hears that this server runs its mods' quiet commands
-    // (horizon_protocol::quiet); a vanilla one is told nothing.
-    if brand == "horizon" {
+    // Current and older Horizon clients know this server runs its quiet
+    // commands; vanilla clients are not told about them.
+    if advertises_quiet_commands(&brand) {
         send(
             c,
             cfg::Clientbound::CustomPayload(cfg::CustomPayload {
@@ -1180,6 +1180,10 @@ fn write_loop(
     writer.shutdown();
 }
 
+fn advertises_quiet_commands(brand: &str) -> bool {
+    matches!(brand, "horizon" | "minecraft-rust-edition")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1200,6 +1204,13 @@ mod tests {
             tag(r#"{"translate":"a","with":["b",{"text":"c","color":"red"}]}"#),
             r#"{"translate":"a","with":["b",{"text":"c","color":"red"}]}"#
         );
+    }
+
+    #[test]
+    fn quiet_commands_are_advertised_to_current_and_older_clients() {
+        assert!(advertises_quiet_commands("minecraft-rust-edition"));
+        assert!(advertises_quiet_commands("horizon"));
+        assert!(!advertises_quiet_commands("vanilla"));
     }
 
     fn unpack(out: Out) -> Vec<Vec<u8>> {

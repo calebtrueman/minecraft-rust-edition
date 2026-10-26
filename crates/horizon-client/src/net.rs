@@ -21,7 +21,7 @@ use std::{
     collections::HashMap,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         mpsc::{Receiver, Sender, channel},
     },
     thread::JoinHandle,
@@ -89,6 +89,10 @@ pub struct Session {
     pub counters: Arc<Mutex<Option<Arc<Counters>>>>,
     /// The cookies this server stored on us (`ClientboundStoreCookiePacket`).
     pub cookies: Cookies,
+    /// Secure-chat signing and the server's last-seen message window.
+    chat: Arc<Mutex<horizon_protocol::secure_chat::ClientChat>>,
+    /// Stand-alone server acknowledgements sent after more than 64 pending messages.
+    chat_ack_packets: Arc<AtomicUsize>,
     /// HORIZON_NET_DEBUG=1 logs every packet sent from the game thread.
     debug: bool,
 }
@@ -143,14 +147,23 @@ impl Session {
     ) -> Self {
         let (send, events) = channel();
         let writer = Arc::new(Mutex::new(None));
+        let chat = Arc::new(Mutex::new(
+            horizon_protocol::secure_chat::ClientChat::default(),
+        ));
+        let chat_ack_packets = Arc::new(AtomicUsize::new(0));
         let configuring = Arc::new(AtomicBool::new(true));
         let counters = Arc::new(Mutex::new(None));
         // Connection.initiateServerboundPlayConnection: a transfer's
         // handshake says so (ClientIntent.TRANSFER).
         let transferred = cookies.is_some();
         let cookies = cookies.unwrap_or_default();
-        let (thread_writer, thread_counters, thread_cookies) =
-            (writer.clone(), counters.clone(), cookies.clone());
+        let (thread_writer, thread_counters, thread_cookies, thread_chat, thread_chat_ack_packets) = (
+            writer.clone(),
+            counters.clone(),
+            cookies.clone(),
+            chat.clone(),
+            chat_ack_packets.clone(),
+        );
         let thread_configuring = configuring.clone();
         let (address_owned, name_owned) = (address.to_owned(), name.to_owned());
         let thread = std::thread::Builder::new()
@@ -160,14 +173,16 @@ impl Session {
                     local,
                     &address_owned,
                     &name_owned,
-                    auth.as_deref(),
+                    auth.clone(),
                     view_distance,
                     &lang,
                     &send,
-                    &thread_writer,
+                    thread_writer.clone(),
                     &thread_configuring,
                     &thread_counters,
                     &thread_cookies,
+                    thread_chat,
+                    thread_chat_ack_packets,
                     transferred,
                 );
                 let from_server = result.is_ok();
@@ -191,12 +206,18 @@ impl Session {
             name: name.to_owned(),
             counters,
             cookies,
+            chat,
+            chat_ack_packets,
             debug,
         }
     }
     /// Everything received since the last poll.
     pub fn poll(&self) -> Vec<Event> {
         self.events.try_iter().collect()
+    }
+    /// How many stand-alone ChatAck packets the network thread sent.
+    pub fn chat_ack_count(&self) -> usize {
+        self.chat_ack_packets.load(Ordering::Relaxed)
     }
     /// Send a play packet; silently dropped once the connection is gone,
     /// and while the server has the connection back in configuration (a
@@ -224,6 +245,70 @@ impl Session {
         {
             w.shutdown();
         }
+    }
+
+    /// Send player chat with a profile-key signature when the account's
+    /// certificate is ready, plus the correct last-seen acknowledgement.
+    /// Returns whether it was signed and the offset carried in that packet.
+    pub fn send_chat_message(&self, message: &str) -> (bool, i32) {
+        let mut chat = self.chat.lock().unwrap();
+        let timestamp = now_millis();
+        let salt = random_chat_salt();
+        let signature =
+            salt.and_then(|salt| chat.sign_chat(message, timestamp, salt).ok().flatten());
+        let last_seen = chat.last_seen_update();
+        let last_seen_offset = last_seen.offset;
+        let signed = signature.is_some();
+        self.send(play::Serverbound::Chat(play::Chat {
+            message: message.to_owned(),
+            timestamp,
+            salt: if signature.is_some() {
+                salt.unwrap_or_default()
+            } else {
+                0
+            },
+            signature,
+            last_seen,
+        }));
+        (signed, last_seen_offset)
+    }
+
+    /// Send a server command. If this account has a current profile key, each
+    /// signable message argument is signed with the same chain as player chat.
+    /// Returns the signed argument count and the packet's last-seen offset, if signed.
+    pub fn send_chat_command(
+        &self,
+        command: &str,
+        arguments: &[(String, String)],
+    ) -> (usize, Option<i32>) {
+        let mut chat = self.chat.lock().unwrap();
+        let timestamp = now_millis();
+        let salt = random_chat_salt();
+        let signatures = salt.and_then(|salt| {
+            chat.sign_command_arguments(arguments, timestamp, salt)
+                .ok()
+                .flatten()
+        });
+        let signed_argument_count = signatures.as_ref().map_or(0, Vec::len);
+        let mut last_seen_offset = None;
+        let packet = match (salt, signatures) {
+            (Some(salt), Some(arguments)) => {
+                let last_seen = chat.last_seen_update();
+                last_seen_offset = Some(last_seen.offset);
+                play::Serverbound::ChatCommandSigned(play::ChatCommandSigned {
+                    command: command.to_owned(),
+                    timestamp,
+                    salt,
+                    arguments,
+                    last_seen,
+                })
+            }
+            _ => play::Serverbound::ChatCommand(play::ChatCommand {
+                command: command.to_owned(),
+            }),
+        };
+        self.send(packet);
+        (signed_argument_count, last_seen_offset)
     }
     /// ServerboundResourcePackPacket, in whichever phase the connection is.
     pub fn send_pack_status(&self, id: u128, action: i32) {
@@ -340,6 +425,19 @@ fn status(send: &Sender<Event>, text: &str) {
     let _ = send.send(Event::Status(text.to_owned()));
 }
 
+fn now_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as i64)
+}
+
+fn random_chat_salt() -> Option<i64> {
+    let mut bytes = [0; 8];
+    horizon_protocol::crypto::random_bytes(&mut bytes)
+        .ok()
+        .map(|()| i64::from_be_bytes(bytes))
+}
+
 /// Shown when an online-mode server asks a client without an account to authenticate.
 pub const NOT_SIGNED_IN: &str = "This server is in online mode. Select your Minecraft account in the Minecraft: Rust Edition launcher to join it.";
 
@@ -354,14 +452,16 @@ fn run(
     local: Option<horizon_protocol::connection::Pipe>,
     address: &str,
     name: &str,
-    auth: Option<&AuthSession>,
+    auth: Option<Arc<AuthSession>>,
     view_distance: i8,
     lang: &Language,
     send: &Sender<Event>,
-    shared_writer: &Mutex<Option<ConnWriter>>,
+    shared_writer: Arc<Mutex<Option<ConnWriter>>>,
     configuring: &AtomicBool,
     shared_counters: &Mutex<Option<Arc<Counters>>>,
     cookies: &Cookies,
+    chat: Arc<Mutex<horizon_protocol::secure_chat::ClientChat>>,
+    chat_ack_packets: Arc<AtomicUsize>,
     transferred: bool,
 ) -> Result<String, String> {
     let (host, port, mut c) = if let Some(pipe) = local {
@@ -403,7 +503,9 @@ fn run(
     )
     .map_err(e)?;
     // Vanilla's login sends the account's profile id, or the offline one.
-    let uuid = auth.map_or_else(|| offline_uuid(name), |a| a.uuid);
+    let uuid = auth
+        .as_deref()
+        .map_or_else(|| offline_uuid(name), |a| a.uuid);
     c.send(
         &login::Serverbound::Hello(login::ServerHello {
             name: name.to_owned(),
@@ -412,6 +514,7 @@ fn run(
         .encode(),
     )
     .map_err(e)?;
+    let mut online_mode = false;
     let profile = loop {
         let (id, payload) = c.recv().map_err(e)?;
         match login::Clientbound::decode(id, &payload).map_err(e)? {
@@ -433,7 +536,8 @@ fn run(
                     .map_err(|err| format!("Protocol error: {err}"))?;
                 let secret = generate_secret().map_err(e)?;
                 if hello.should_authenticate {
-                    let account = auth.ok_or_else(|| NOT_SIGNED_IN.to_owned())?;
+                    let account = auth.as_deref().ok_or_else(|| NOT_SIGNED_IN.to_owned())?;
+                    online_mode = true;
                     let hash = server_hash(&hello.server_id, &secret, &hello.public_key);
                     if let Err(err) = crate::auth::join_server(account, &hash) {
                         let reason = match err.reason() {
@@ -498,13 +602,62 @@ fn run(
     .map_err(e)?;
     let (mut reader, writer) = c.split();
     *shared_writer.lock().unwrap() = Some(writer);
-    let registries = configure(&mut reader, shared_writer, configuring, lang, send, cookies)?;
+    let registries = configure(
+        &mut reader,
+        &shared_writer,
+        configuring,
+        lang,
+        send,
+        cookies,
+    )?;
     let _ = send.send(Event::Joined {
         registries: Arc::new(registries),
         uuid: profile.uuid,
         name: profile.name,
     });
-    receive_play(&mut reader, shared_writer, configuring, lang, send, cookies)
+    if online_mode && let Some(account) = auth {
+        let worker_chat = chat.clone();
+        let worker_writer = shared_writer.clone();
+        let _ = std::thread::Builder::new()
+            .name("horizon-chat-certificate".into())
+            .spawn(
+                move || match crate::auth::fetch_profile_certificate(&account) {
+                    Ok(certificate) => {
+                        let mut chat = worker_chat.lock().unwrap();
+                        match chat.install(account.uuid, certificate.key, certificate.private_key) {
+                            Ok(Some(update)) => {
+                                if let Some(writer) = worker_writer.lock().unwrap().as_mut()
+                                    && let Err(error) = writer.send(
+                                        &play::Serverbound::ChatSessionUpdate(update).encode(),
+                                    )
+                                {
+                                    log::warn!(
+                                        "Horizon: could not send the secure chat session: {error}"
+                                    );
+                                }
+                            }
+                            Ok(None) => {}
+                            Err(error) => {
+                                log::warn!(
+                                    "Horizon: could not create a secure chat session: {error}"
+                                );
+                            }
+                        }
+                    }
+                    Err(error) => log::warn!("Horizon: secure chat is unavailable: {error}"),
+                },
+            );
+    }
+    receive_play(
+        &mut reader,
+        &shared_writer,
+        configuring,
+        lang,
+        send,
+        cookies,
+        &chat,
+        &chat_ack_packets,
+    )
 }
 
 fn receive_play(
@@ -514,6 +667,8 @@ fn receive_play(
     lang: &Language,
     send: &Sender<Event>,
     cookies: &Cookies,
+    chat: &Mutex<horizon_protocol::secure_chat::ClientChat>,
+    chat_ack_packets: &AtomicUsize,
 ) -> Result<String, String> {
     loop {
         let (id, payload) = reader.recv().map_err(|e| e.to_string())?;
@@ -535,6 +690,29 @@ fn receive_play(
                 let _ = w.send(&p.encode());
             }
         };
+        if let play::Clientbound::Login(_) = &packet {
+            let mut chat = chat.lock().unwrap();
+            if let Some(update) = chat.start()
+                && let Some(writer) = shared_writer.lock().unwrap().as_mut()
+            {
+                let _ = writer.send(&play::Serverbound::ChatSessionUpdate(update).encode());
+            }
+        }
+        let ack_offset = if let play::Clientbound::PlayerChat(message) = &packet {
+            chat.lock()
+                .unwrap()
+                .receive(&message.last_seen, message.signature.as_deref())
+        } else {
+            None
+        };
+        if let Some(offset) = ack_offset
+            && let Some(writer) = shared_writer.lock().unwrap().as_mut()
+            && writer
+                .send(&play::Serverbound::ChatAck(play::ChatAck { offset }).encode())
+                .is_ok()
+        {
+            chat_ack_packets.fetch_add(1, Ordering::Relaxed);
+        }
         match packet {
             play::Clientbound::KeepAlive(k) => reply(play::Serverbound::KeepAlive(k)),
             play::Clientbound::BundleDelimiter(_) => {}
@@ -678,7 +856,7 @@ fn receive_brand(payload: &cfg::CustomPayload, send: &Sender<Event>) {
 /// The minecraft:brand payload: a string naming the client.
 fn brand() -> Vec<u8> {
     let mut w = horizon_protocol::buf::Writer::new();
-    w.string("horizon");
+    w.string("minecraft-rust-edition");
     w.data
 }
 
@@ -775,12 +953,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pings_wait_behind_teleports_but_keepalives_do_not_wait_for_the_game() {
+    fn play_sends_standalone_ack_after_more_than_sixty_four_messages() {
         let (client, server) = horizon_protocol::connection::Pipe::pair();
         let (mut reader, writer) = Connection::local(client).split();
         let writer = Arc::new(Mutex::new(Some(writer)));
-        let (send, events) = channel();
-        let thread_writer = writer.clone();
+        let (send, _events) = channel();
+        let chat = Arc::new(Mutex::new(
+            horizon_protocol::secure_chat::ClientChat::default(),
+        ));
+        let chat_ack_packets = Arc::new(AtomicUsize::new(0));
+        let (thread_writer, thread_chat, thread_chat_ack_packets) =
+            (writer.clone(), chat.clone(), chat_ack_packets.clone());
         let thread = std::thread::spawn(move || {
             receive_play(
                 &mut reader,
@@ -789,6 +972,67 @@ mod tests {
                 &Language::new(),
                 &send,
                 &Cookies::default(),
+                &thread_chat,
+                &thread_chat_ack_packets,
+            )
+        });
+        let mut server = Connection::local(server);
+        for index in 0..65 {
+            server
+                .send(
+                    &play::Clientbound::PlayerChat(play::PlayerChat {
+                        global_index: index,
+                        sender: 7,
+                        index,
+                        signature: Some(vec![(index + 1) as u8; 256]),
+                        content: "hello".into(),
+                        timestamp: 1_700_000_000_000 + i64::from(index),
+                        salt: i64::from(index),
+                        last_seen: Vec::new(),
+                        unsigned_content: None,
+                        filter: (0, Vec::new()),
+                        chat_type: play::ChatTypeBound {
+                            chat_type: 0,
+                            name: horizon_protocol::text::literal("Steve"),
+                            target: None,
+                        },
+                    })
+                    .encode(),
+                )
+                .unwrap();
+        }
+        let (id, body) = server.recv().unwrap();
+        assert_eq!(
+            play::Serverbound::decode(id, &body).unwrap(),
+            play::Serverbound::ChatAck(play::ChatAck { offset: 65 })
+        );
+        assert_eq!(chat_ack_packets.load(Ordering::Relaxed), 1);
+        writer.lock().unwrap().take().unwrap().shutdown();
+        assert!(thread.join().unwrap().is_err());
+    }
+
+    #[test]
+    fn pings_wait_behind_teleports_but_keepalives_do_not_wait_for_the_game() {
+        let (client, server) = horizon_protocol::connection::Pipe::pair();
+        let (mut reader, writer) = Connection::local(client).split();
+        let writer = Arc::new(Mutex::new(Some(writer)));
+        let (send, events) = channel();
+        let thread_writer = writer.clone();
+        let chat = Arc::new(Mutex::new(
+            horizon_protocol::secure_chat::ClientChat::default(),
+        ));
+        let thread_chat = chat.clone();
+        let thread_chat_ack_packets = Arc::new(AtomicUsize::new(0));
+        let thread = std::thread::spawn(move || {
+            receive_play(
+                &mut reader,
+                &thread_writer,
+                &AtomicBool::new(false),
+                &Language::new(),
+                &send,
+                &Cookies::default(),
+                &thread_chat,
+                &thread_chat_ack_packets,
             )
         });
         let mut server = Connection::local(server);
@@ -839,10 +1083,16 @@ mod tests {
             name: "Player".into(),
             counters: Arc::new(Mutex::new(None)),
             cookies: Cookies::default(),
+            chat: Arc::new(Mutex::new(
+                horizon_protocol::secure_chat::ClientChat::default(),
+            )),
+            chat_ack_packets: Arc::new(AtomicUsize::new(0)),
             debug: false,
         };
         let (thread_writer, thread_configuring) =
             (session.writer.clone(), session.configuring.clone());
+        let thread_chat = session.chat.clone();
+        let thread_chat_ack_packets = session.chat_ack_packets.clone();
         let thread = std::thread::spawn(move || {
             receive_play(
                 &mut reader,
@@ -851,6 +1101,8 @@ mod tests {
                 &Language::new(),
                 &send,
                 &Cookies::default(),
+                &thread_chat,
+                &thread_chat_ack_packets,
             )
         });
         let mut server = Connection::local(server);
@@ -888,7 +1140,12 @@ mod tests {
         let writer = Arc::new(Mutex::new(Some(writer)));
         let (send, events) = channel();
         let cookies = Cookies::default();
-        let (thread_writer, thread_cookies) = (writer.clone(), cookies.clone());
+        let chat = Arc::new(Mutex::new(
+            horizon_protocol::secure_chat::ClientChat::default(),
+        ));
+        let (thread_writer, thread_cookies, thread_chat) =
+            (writer.clone(), cookies.clone(), chat.clone());
+        let thread_chat_ack_packets = Arc::new(AtomicUsize::new(0));
         let thread = std::thread::spawn(move || {
             receive_play(
                 &mut reader,
@@ -897,6 +1154,8 @@ mod tests {
                 &Language::new(),
                 &send,
                 &thread_cookies,
+                &thread_chat,
+                &thread_chat_ack_packets,
             )
         });
         let mut server = Connection::local(server);
@@ -961,5 +1220,15 @@ mod tests {
         payload.data = vec![0xff];
         receive_brand(&payload, &send);
         assert!(events.try_recv().is_err());
+    }
+
+    #[test]
+    fn client_brand_uses_the_public_product_name() {
+        assert_eq!(
+            horizon_protocol::buf::Reader::new(&brand())
+                .string(32767)
+                .unwrap(),
+            "minecraft-rust-edition"
+        );
     }
 }

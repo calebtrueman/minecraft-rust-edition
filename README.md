@@ -11,29 +11,42 @@ This is work in progress, not a finished replacement for Java Edition.
 - Gameplay stays in Rust. Java is used to prepare the game files from your own installation.
 - The launcher reads the existing Minecraft files it supports. Its current game version is pinned
   in `research-lock.json`; an older Java installation alone is not enough.
-- **Use Prism account** imports the selected account's current Minecraft session. Ownership and
-  profile are checked with Minecraft's service. Each launch reads the same account again.
-  If it expires, open Prism and launch Minecraft online, then retry. No Microsoft refresh token
-  or other launcher's app ID is imported. The source file is never changed.
-- Account import supports Prism's `accounts.json`, including a custom path through
-  `horizon-launcher account import PATH`. Official-launcher private account storage is not supported.
-- The Rust client already has encrypted online-server login. A real online-server join has not
-  been verified for this fork. Full Java multiplayer behavior is not claimed.
+- **Import launcher session** reads the official launcher's selected Minecraft account, or
+  Prism when no official account file exists. Ownership and profile are checked with Minecraft.
+  On macOS, if the official file has a blank token, it can read the matching session from your
+  running Minecraft game. The imported session can then be reused until it expires; sign in and
+  launch through the source launcher again to renew it. No Microsoft refresh token or other
+  launcher's app ID is imported. Source files are never changed.
+- A custom account file can be selected with `horizon-launcher account import PATH`.
+  Running-game session import is currently macOS-only. It does not decrypt launcher credentials.
+- The Rust client passed a local test against the unchanged Java 26.3 server with a real
+  account: encrypted login, 49 loaded chunks, 25 signed chat messages, `/list` and a signed
+  private command to the same player. This does not establish
+  full Java multiplayer behavior or modded-server compatibility.
 - **Fabric and Java mod jars do not run in the Rust engine.** Reading a modpack's data and assets
-  is not the same as running its mods. A Java-compatible mod runtime remains unimplemented.
+  is not the same as running its mods. An early Rust bytecode reader and interpreter is being
+  built and tested separately; it cannot load Fabric or run the installed mods yet.
+  See [the compatibility work](docs/java-mod-compatibility.md).
 - Updates point to this fork. No fork release binaries have been published yet. Release signing
   still needs this fork's own key before distributing builds.
 - Launcher data goes in `minecraft-rust-edition-launcher`; saves go in `minecraft-rust-edition`
   under the OS data folder. Existing Minecraft and Horizon folders are not moved or edited.
-- Upstream sponsor buttons and hosting ads are removed. Telemetry has no default server.
-  Internal crate names and some upstream features and artwork still need a full rename.
+- Upstream sponsor buttons and hosting ads are removed. Telemetry has no default server,
+  and Discord presence requires an explicitly configured app ID.
+  The launcher and packaged app use a new cube icon. Internal crate names and some upstream
+  features still need a full rename.
 
 ## Build
 
 The launcher is Rust: `cargo run --manifest-path launcher/Cargo.toml`.
 The game builds with `cargo build --profile fast -p horizon-client`.
 These commands build from source; the launcher cannot download a fork release until one exists.
-See [the upstream build and setup notes](README.upstream.md) for resource preparation.
+See [source build instructions](docs/source-builds.md) for packaging and local installation.
+
+On macOS, a local package was installed and prepared from an existing official-launcher
+Fabric profile for the pinned game version. The launcher then started a Rust test world
+with 49 generated chunks and no reported error. This resource-preparation test did not load
+Fabric mods. The separate account-checked multiplayer test is described above.
 
 ## Remaining work
 
