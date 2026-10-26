@@ -17,7 +17,7 @@ const MIN_SECONDS: f32 = 60.0;
 
 /// The details of a crash report that say what the game was doing, and only those: not the
 /// world, the server or the resource packs.
-const CRASH_DETAILS: [&str; 3] = ["Horizon Version", "Graphics Adapter", "Render Settings"];
+const CRASH_DETAILS: [&str; 3] = ["Rust Edition Version", "Graphics Adapter", "Render Settings"];
 
 static STARTED: OnceLock<Instant> = OnceLock::new();
 /// When the menu bundle became ready, so the time to the title screen measures
@@ -204,7 +204,7 @@ pub fn crash_item(report: &crate::crash::Report) -> Item {
 /// Keeps the crash for the launcher to send, if the player allows crash reports.
 pub fn keep_crash(home: &Path, report: &crate::crash::Report) {
     if let Err(e) = outbox::push(home, &crash_item(report)) {
-        log::warn!("Horizon: could not keep the crash report to send: {e}");
+        log::warn!("Rust Edition: could not keep the crash report to send: {e}");
     }
 }
 
@@ -218,7 +218,7 @@ pub fn keep_benchmark(home: &Path, report: &horizon_bench::Report) {
         home,
         &Item::new(Source::Game, version(), Payload::Benchmark(data)),
     ) {
-        log::warn!("Horizon: could not keep the benchmark report to send: {e}");
+        log::warn!("Rust Edition: could not keep the benchmark report to send: {e}");
     }
 }
 
@@ -301,7 +301,7 @@ impl Session {
         {
             let item = Item::new(Source::Game, version(), Payload::Perf(perf));
             if let Err(e) = outbox::push(home, &item) {
-                log::warn!("Horizon: could not keep the session's performance summary: {e}");
+                log::warn!("Rust Edition: could not keep the session's performance summary: {e}");
             }
         }
         *self = Self {
@@ -374,7 +374,7 @@ mod tests {
             side: "client",
             details: vec![
                 (
-                    "Horizon Version".into(),
+                    "Rust Edition Version".into(),
                     "v2026.10.15 (client 0.1.0)".into(),
                 ),
                 (
@@ -402,7 +402,7 @@ mod tests {
         assert_eq!(
             crash.details,
             [(
-                "Horizon Version".to_owned(),
+                "Rust Edition Version".to_owned(),
                 "v2026.10.15 (client 0.1.0)".to_owned()
             )]
         );

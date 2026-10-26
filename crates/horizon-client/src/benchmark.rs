@@ -82,8 +82,8 @@ pub fn start(requests: Sender<Request>, setup: Setup) {
         .spawn(move || {
             let control = Control(requests);
             match run(&control, setup) {
-                Ok(path) => println!("Horizon: benchmark report {}", path.display()),
-                Err(e) => eprintln!("Horizon: benchmark failed: {e}"),
+                Ok(path) => println!("Rust Edition: benchmark report {}", path.display()),
+                Err(e) => eprintln!("Rust Edition: benchmark failed: {e}"),
             }
             let _ = control.call("quit");
         })
