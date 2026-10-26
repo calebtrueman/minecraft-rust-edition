@@ -142,7 +142,7 @@ async fn uploads_come_back_grouped_and_anonymous() {
 
     let (code, body, origin) = get(&app, "/v1/benchmarks/summary").await;
     assert_eq!(code, StatusCode::OK);
-    assert_eq!(origin.as_deref(), Some("https://playhorizon.dev"));
+    assert_eq!(origin, None);
     let s: Value = serde_json::from_str(&body).unwrap();
     assert_eq!(s["groups"], expected()["groups"]);
     assert_eq!(s["groups"][0]["breakdowns"]["vram"][0]["installs"], 3);

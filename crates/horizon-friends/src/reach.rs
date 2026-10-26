@@ -10,8 +10,7 @@ use std::{
 };
 
 /// Where the troubleshooting lives (shown to hosts nobody can reach).
-pub const HELP_URL: &str =
-    "https://github.com/ludovic111/horizon/blob/main/docs/play-with-friends.md#troubleshooting";
+pub const HELP_URL: &str = "https://github.com/calebtrueman/minecraft-rust-edition/blob/main/docs/play-with-friends.md#troubleshooting";
 
 #[derive(Clone, Debug)]
 pub struct Options {

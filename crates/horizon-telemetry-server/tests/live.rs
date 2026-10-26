@@ -57,10 +57,7 @@ async fn count(app: &Arc<App>) -> Count {
     let (code, headers, body) = send(app, req).await;
     assert_eq!(code, StatusCode::OK, "{body}");
     assert_eq!(headers[header::CONTENT_TYPE], "application/json");
-    assert_eq!(
-        headers[header::ACCESS_CONTROL_ALLOW_ORIGIN],
-        "https://playhorizon.dev"
-    );
+    assert!(!headers.contains_key(header::ACCESS_CONTROL_ALLOW_ORIGIN));
     serde_json::from_str(&body).unwrap()
 }
 

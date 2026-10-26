@@ -376,11 +376,13 @@ async fn old_entries_go_and_reports_never_opened_are_given_up() {
 
 #[tokio::test]
 async fn the_website_may_post_from_the_browser() {
-    let hub = hub(config());
+    let mut config = config();
+    config.allow_origin = "https://example.test".into();
+    let hub = hub(config);
     let res = router(hub.app.clone())
         .oneshot(
             Request::options("/hub/report")
-                .header("origin", "https://playhorizon.dev")
+                .header("origin", "https://example.test")
                 .header("access-control-request-method", "POST")
                 .body(Body::empty())
                 .unwrap(),
@@ -391,7 +393,7 @@ async fn the_website_may_post_from_the_browser() {
     let header = |name: &str| res.headers()[name].to_str().unwrap().to_owned();
     assert_eq!(
         header("access-control-allow-origin"),
-        "https://playhorizon.dev"
+        "https://example.test"
     );
     assert_eq!(header("access-control-allow-methods"), "POST");
     assert_eq!(header("access-control-allow-headers"), "content-type");

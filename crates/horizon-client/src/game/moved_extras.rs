@@ -1,8 +1,8 @@
 //! Extras that are official mods now (`horizon_client::moved_extras`): on
 //! the first start after the update, a player who had one on gets the mod
-//! installed from Horizon's registry, turned on, with their settings, and
-//! one line in the chat saying so. The download runs on its own thread; if
-//! it fails (offline), the game tries again at the next start.
+//! installed from an explicitly configured registry, turned on, with their
+//! settings, and one line in the chat saying so. The download runs on its own
+//! thread; if it fails, the game tries again at the next start.
 
 #[cfg(not(feature = "mods"))]
 impl super::Game<'_> {
@@ -93,14 +93,26 @@ mod with_mods {
                             installed = true;
                         }
                         Err(e) => {
-                            log::warn!("Horizon: {} not installed, next start retries: {e}", m.id);
-                            self.mods.moved.notices.push(
-                                Text::literal(format!(
-                                    "{} moved to the mod browser; it couldn't be installed for you yet, Horizon tries again at the next start",
+                            let notice = if e == moved_extras::NO_INDEX_ERROR {
+                                log::info!("Moved extra {} migration paused: {e}", m.id);
+                                format!(
+                                    "{} is still saved in your settings. Automatic migration is paused because this build has no mod registry configured.",
                                     m.name
-                                ))
-                                .with_color(text::GRAY),
-                            );
+                                )
+                            } else {
+                                log::warn!(
+                                    "Moved extra {} not installed, retrying next start: {e}",
+                                    m.id
+                                );
+                                format!(
+                                    "{} moved to the mod browser; it couldn't be installed for you yet. The game tries again the next time you start.",
+                                    m.name
+                                )
+                            };
+                            self.mods
+                                .moved
+                                .notices
+                                .push(Text::literal(notice).with_color(text::GRAY));
                         }
                     }
                 }

@@ -88,7 +88,7 @@ impl Default for Config {
             requests_per_hour: 60.0,
             items_per_day: 100,
             trust_proxy: false,
-            allow_origin: "https://playhorizon.dev".into(),
+            allow_origin: String::new(),
             live_per_hour: 600.0,
             live_window: horizon_telemetry::live::WINDOW,
             live_max_sessions: 200_000,
@@ -99,7 +99,7 @@ impl Default for Config {
             hub_keep_days: 90,
             hub_token: None,
             github_token: None,
-            github_repo: "ludovic111/horizon".into(),
+            github_repo: "calebtrueman/minecraft-rust-edition".into(),
         }
     }
 }
@@ -544,22 +544,27 @@ async fn playing(State(app): State<Arc<App>>, req: Request) -> Response {
 }
 
 fn json_response(app: &App, json: String, max_age: u64) -> Response {
-    let origin =
-        HeaderValue::from_str(&app.config.allow_origin).unwrap_or(HeaderValue::from_static("*"));
     let cache = HeaderValue::from_str(&format!("public, max-age={max_age}"))
         .unwrap_or(HeaderValue::from_static("no-cache"));
-    (
+    let mut response = (
         [
             (
                 header::CONTENT_TYPE,
                 HeaderValue::from_static("application/json"),
             ),
             (header::CACHE_CONTROL, cache),
-            (header::ACCESS_CONTROL_ALLOW_ORIGIN, origin),
         ],
         json,
     )
-        .into_response()
+        .into_response();
+    if !app.config.allow_origin.is_empty()
+        && let Ok(origin) = HeaderValue::from_str(&app.config.allow_origin)
+    {
+        response
+            .headers_mut()
+            .insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin);
+    }
+    response
 }
 
 pub fn router(app: Arc<App>) -> Router {

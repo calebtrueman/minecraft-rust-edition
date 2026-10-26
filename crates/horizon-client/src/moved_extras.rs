@@ -1,8 +1,8 @@
 //! Extras that became official mods (docs/mods.md, "Horizon's official
-//! mods"). For a player who had one on, the game installs the mod from
-//! Horizon's registry once, checked as the launcher checks it, turns it on
-//! and carries the extra's settings over into the mod's storage. A player
-//! who had it off gets nothing: the mod is in the mod browser.
+//! mods"). For a player who had one on, the game installs the mod from an
+//! explicitly configured registry, checked as the launcher checks it, turns
+//! it on, and carries the extra's settings over into the mod's storage. If no
+//! registry is configured, the extra stays on and its settings stay saved.
 use crate::{extras::Extras, mod_list::ModList};
 use horizon_mods::index::{self, Index};
 use std::{
@@ -11,9 +11,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
-/// Horizon's registry; `HORIZON_MOD_INDEX` points elsewhere (a local file
-/// for trials, whose files may then be `file://`), as for the launcher.
-pub const INDEX_URL: &str = "https://ludovic111.github.io/horizon-mods/index.json";
+/// The migration needs an explicitly configured registry, just like the launcher.
+pub const NO_INDEX_ERROR: &str =
+    "Automatic migration is paused because this build has no mod registry configured.";
 const MAX_INDEX: u64 = 16 << 20;
 
 /// An extra that is an official mod now.
@@ -113,11 +113,11 @@ pub fn nothing_to_do(e: &Extras) -> Vec<&'static Moved> {
         .collect()
 }
 
-fn location() -> String {
+fn location() -> Option<String> {
     std::env::var("HORIZON_MOD_INDEX")
         .ok()
+        .map(|v| v.trim().to_owned())
         .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| INDEX_URL.to_owned())
 }
 
 /// `url`'s bytes, at most `max`: `https://` from the network; `file://` only
@@ -152,9 +152,13 @@ fn get(url: &str, local: bool, max: u64) -> Result<Vec<u8>, String> {
 
 /// The registry's index, from the network (or `HORIZON_MOD_INDEX`).
 pub fn fetch_index() -> Result<Index, String> {
-    let at = location();
+    fetch_index_at(location().as_deref())
+}
+
+fn fetch_index_at(at: Option<&str>) -> Result<Index, String> {
+    let at = at.ok_or_else(|| NO_INDEX_ERROR.to_owned())?;
     let local = !at.starts_with("https://");
-    let text = String::from_utf8(get(&at, local, MAX_INDEX)?).map_err(|e| e.to_string())?;
+    let text = String::from_utf8(get(at, local, MAX_INDEX)?).map_err(|e| e.to_string())?;
     if local {
         Index::parse_local(&text)
     } else {
@@ -171,20 +175,21 @@ pub fn fetch_index() -> Result<Index, String> {
 pub fn install(index: &Index, m: &Moved, e: &Extras, dir: &Path) -> Result<(), String> {
     let project = index
         .project(m.id)
-        .ok_or_else(|| format!("{} isn't in Horizon's registry yet", m.id))?;
+        .ok_or_else(|| format!("{} isn't in the configured registry yet", m.id))?;
     let version = index
         .installable(
             project,
             horizon_core::version::VERSION_ID,
             horizon_mods::api_level::LEVEL,
         )
-        .ok_or_else(|| format!("{} has no version this Horizon can run", m.id))?;
+        .ok_or_else(|| format!("{} has no version this game can run", m.id))?;
     let mods = dir.join(crate::mod_list::DIR);
     fs::create_dir_all(&mods).map_err(|e| format!("{}: {e}", mods.display()))?;
     let target = mods.join(format!("{}.hmod", m.id));
     let current = index::sha256_file(&target).ok();
     if current.as_deref() != Some(version.file.sha256.as_str()) {
-        let local = !location().starts_with("https://");
+        let at = location().ok_or_else(|| NO_INDEX_ERROR.to_owned())?;
+        let local = !at.starts_with("https://");
         let bytes = get(&version.file.url, local, index::MAX_FILE)?;
         let partial: PathBuf = mods.join(format!(".{}.hmod.download", m.id));
         fs::write(&partial, bytes).map_err(|e| format!("{}: {e}", partial.display()))?;
@@ -282,5 +287,11 @@ mod tests {
     fn a_file_url_needs_a_local_index() {
         assert!(get("file:///etc/hosts", false, 1 << 20).is_err());
         assert!(get("http://example.com/x", true, 1 << 20).is_err());
+    }
+
+    #[test]
+    fn no_registry_does_not_try_a_default_index() {
+        let error = fetch_index_at(None).unwrap_err();
+        assert_eq!(error, NO_INDEX_ERROR);
     }
 }

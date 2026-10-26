@@ -1,5 +1,5 @@
-//! `horizon-mod-registry`: the submission form's service at
-//! `playhorizon.dev/api/mods/*` (docs/api/mod-index.md). A creator signs in
+//! `horizon-mod-registry`: the submission form's service at the configured
+//! public URL's `/api/mods/*` routes (docs/api/mod-index.md). A creator signs in
 //! with GitHub, sends a file and its page; the service runs the file's own
 //! checks, uploads it to the registry's `staging` release and opens a pull
 //! request with the entry. Reviewers decide; merging publishes. Signed-in
@@ -48,8 +48,7 @@ const RATINGS_PER_HOUR: usize = 600;
 const TOTALS_FOR: Duration = Duration::from_secs(60);
 
 pub struct Config {
-    /// `https://playhorizon.dev`: where the form is, and the only origin it
-    /// takes submissions from.
+    /// Where the form is, and the only origin it takes submissions from.
     pub public_url: String,
     /// At least 32 bytes: signs sessions.
     pub session_key: Vec<u8>,
@@ -75,7 +74,7 @@ impl Config {
             session_key: key.into_bytes(),
             github: GitHub::new(
                 github::Endpoints::default(),
-                std::env::var("REGISTRY_REPO").unwrap_or_else(|_| "ludovic111/horizon-mods".into()),
+                var("REGISTRY_REPO")?,
                 var("GITHUB_CLIENT_ID")?,
                 var("GITHUB_CLIENT_SECRET")?,
                 var("GITHUB_BOT_TOKEN")?,

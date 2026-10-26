@@ -1,5 +1,5 @@
 //! Downloads that reach the game folder only when their checksum matches the source's.
-use super::{safe_name, FileRef};
+use super::{FileRef, safe_name};
 use sha1::Sha1;
 use sha2::{Digest, Sha256, Sha512};
 use std::fs;
@@ -27,7 +27,7 @@ pub(super) fn agent(url: &str) -> ureq::Agent {
     horizon_port_pack::net::keep("browser", spec.as_deref(), |proxy| {
         let builder = ureq::AgentBuilder::new()
             .user_agent(&format!(
-                "ludovic111/horizon horizon-launcher/{} (github.com/ludovic111/horizon)",
+                "calebtrueman/minecraft-rust-edition horizon-launcher/{} (github.com/calebtrueman/minecraft-rust-edition)",
                 crate::backend::VERSION
             ))
             .timeout_connect(std::time::Duration::from_secs(15))

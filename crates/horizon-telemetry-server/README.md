@@ -5,7 +5,7 @@ This server receives what players choose to send (performance summaries, crash a
     cargo run --release                     # in this folder: its own workspace, like the launcher's
     PORT=8080 HORIZON_TELEMETRY_DB=/data/telemetry.sqlite3 horizon-telemetry-server
 
-It runs at **https://telemetry.playhorizon.dev** (`DEFAULT_ENDPOINT` in `crates/horizon-telemetry`). The game and the launcher use it unless `HORIZON_TELEMETRY_URL` names another server, or is `off` (tests and automated runs send nothing).
+The game and launcher send nothing by default. They use this server only when `HORIZON_TELEMETRY_URL` is set to its address; `HORIZON_TELEMETRY_URL=off` keeps sending disabled.
 
 ## Endpoints
 
@@ -78,7 +78,7 @@ All are environment variables:
 - `HORIZON_TELEMETRY_REQUESTS_PER_HOUR` per address (60, bursts of 6)
 - `HORIZON_TELEMETRY_ITEMS_PER_DAY` per install (100)
 - `HORIZON_TELEMETRY_TRUST_PROXY=1` behind a proxy (the client's address is then the proxy's `X-Real-IP`, else the last `X-Forwarded-For` entry; it is used only for the rate limits, in memory, and never stored or logged)
-- `HORIZON_TELEMETRY_ALLOW_ORIGIN` (`https://playhorizon.dev`)
+- `HORIZON_TELEMETRY_ALLOW_ORIGIN` (unset by default; set the website origin to allow browser requests)
 - `HORIZON_TELEMETRY_LIVE_PER_HOUR` per address, pings and reads (600, bursts of 60: ten players behind one address)
 - `HORIZON_TELEMETRY_LIVE_WINDOW_SECONDS` (120)
 - `HORIZON_TELEMETRY_LIVE_MAX_SESSIONS` (200 000)
@@ -89,7 +89,7 @@ All are environment variables:
 - `HORIZON_TELEMETRY_HUB_KEEP_DAYS` (90)
 - `HORIZON_TELEMETRY_HUB_TOKEN`: the token Kira reads the suggestions with (unset: `GET /hub/suggestions` is off)
 - `HORIZON_TELEMETRY_GITHUB_TOKEN`: a fine-grained token with Issues read and write on the repository only (unset: `POST /hub/report` answers 503 and the form points to GitHub and Discord)
-- `HORIZON_TELEMETRY_GITHUB_REPO` (`ludovic111/horizon`)
+- `HORIZON_TELEMETRY_GITHUB_REPO` (`calebtrueman/minecraft-rust-edition`)
 
 ## Hosting
 
