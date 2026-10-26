@@ -153,7 +153,7 @@ impl Sprites {
                 // `MissingTextureAtlasSprite.getLocation()`: vanilla models name the
                 // missing texture on purpose (block/air.json's particle), #853.
                 if name != "minecraft:missingno" {
-                    log::warn!("Horizon: using the missing texture for {name}: {e}");
+                    log::warn!("Rust Edition: using the missing texture for {name}: {e}");
                 }
                 // MissingTextureAtlasSprite.generateMissingImage: 16x16,
                 // magenta and black quarters.

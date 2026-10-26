@@ -67,8 +67,8 @@ Worlds autosave every 6000 ticks (5 minutes), when chunks unload and on quit.
 On headless Linux use `vscreen start ./target/release/horizon-client` and
 `vscreen shot`.
 
-Sound: the game prints the output it opened (`Horizon: audio output ...`) or
-why it has none (`Horizon: no sound: ...`). It opens none with
+Sound: the game prints the output it opened (`Rust Edition: audio output ...`) or
+why it has none (`Rust Edition: no sound: ...`). It opens none with
 `HORIZON_NO_AUDIO` set, nor on a `vscreen`, where tests run beside someone
 listening; `HORIZON_AUDIO=1` opens it there anyway, so send it to a null sink
 (`PIPEWIRE_PROPS='{ target.object=<sink> node.dont-fallback=true }'`). Don't

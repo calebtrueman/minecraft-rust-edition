@@ -602,7 +602,7 @@ impl Occlusion {
                 self.changed_late.clear();
                 return;
             }
-            log::warn!("Horizon: the occlusion worker stopped; culling on the render thread");
+            log::warn!("Rust Edition: the occlusion worker stopped; culling on the render thread");
             self.worker = None;
         }
         self.edits.clear();

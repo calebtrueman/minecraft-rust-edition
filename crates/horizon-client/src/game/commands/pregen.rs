@@ -206,7 +206,7 @@ impl Game<'_> {
                 .count();
             let [missing, lighting, unlit] = streaming.unstick_light(&mut self.world, &row);
             log::warn!(
-                "Horizon: pregeneration waits on row {:?}: {missing} not loaded, {lighting} being lit, \
+                "Rust Edition: pregeneration waits on row {:?}: {missing} not loaded, {lighting} being lit, \
                  {unlit} unlit with no light job (queued again), {waiting} not post-processed; {:?}",
                 row.first(),
                 streaming.stages()

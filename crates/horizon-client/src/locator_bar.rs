@@ -174,7 +174,7 @@ impl WaypointStyles {
                 {
                     out.insert(format!("{namespace}:{name}"), style);
                 } else {
-                    log::warn!("Horizon: invalid waypoint style {}", path.display());
+                    log::warn!("Rust Edition: invalid waypoint style {}", path.display());
                 }
             }
         }

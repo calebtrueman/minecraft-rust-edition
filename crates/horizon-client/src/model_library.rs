@@ -97,7 +97,7 @@ impl ParsedModels {
                     match read() {
                         Ok(model) => Arc::new(model),
                         Err(e) if or_missing => {
-                            log::warn!("Horizon: missing block model {name}: {e}");
+                            log::warn!("Rust Edition: missing block model {name}: {e}");
                             skipped.insert(name);
                             continue;
                         }

@@ -604,7 +604,7 @@ impl Launcher {
                 }
                 Msg::PackDone(result) => self.pack_done(result),
                 Msg::Line(job, line) => {
-                    if job == Job::Client && line.starts_with(perf::GAME_FIRST_FRAME) {
+                    if job == Job::Client && perf::is_game_first_frame_line(&line) {
                         if let Some(pressed) = self.play_pressed.take() {
                             self.perf
                                 .record_since("launcher.play_to_game_frame_ms", pressed);

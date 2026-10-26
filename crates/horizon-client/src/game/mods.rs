@@ -217,14 +217,14 @@ pub(super) fn content_root(
                 id: m.id.clone(),
                 content,
             }),
-            Err(e) => log::warn!("Horizon: mod {} content not loaded: {e}", m.id),
+            Err(e) => log::warn!("Rust Edition: mod {} content not loaded: {e}", m.id),
         }
     }
     match mod_content::resource_root(root, &mods, &here.join(".horizon-cache")) {
         Ok(out) => {
             if out != root {
                 log::info!(
-                    "Horizon: content from {} mod(s) in {}",
+                    "Rust Edition: content from {} mod(s) in {}",
                     mods.len(),
                     out.display()
                 );
@@ -232,7 +232,7 @@ pub(super) fn content_root(
             out
         }
         Err(e) => {
-            log::warn!("Horizon: content mods not loaded: {e}");
+            log::warn!("Rust Edition: content mods not loaded: {e}");
             root.to_owned()
         }
     }
@@ -247,7 +247,7 @@ impl Game<'_> {
         let found = horizon_mods::find(&dir).len() + self.mods.dev.len();
         if found > 0 {
             log::warn!(
-                "Horizon: {found} mod(s) not started: this build has no mod runtime (build with --features mods)"
+                "Rust Edition: {found} mod(s) not started: this build has no mod runtime (build with --features mods)"
             );
         }
     }
@@ -592,7 +592,7 @@ impl Game<'_> {
             if self.options.execution_role.is_client() {
                 self.system_message(Text::literal("Mods reloaded").with_color(text::GRAY));
             } else {
-                log::info!("Horizon: mods reloaded");
+                log::info!("Rust Edition: mods reloaded");
             }
         }
     }

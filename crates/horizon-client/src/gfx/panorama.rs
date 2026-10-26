@@ -16,7 +16,7 @@ pub struct Faces {
 impl Faces {
     pub fn load(root: &Path) -> Self {
         Self::try_load(root).unwrap_or_else(|error| {
-            log::warn!("Horizon: title panorama unavailable ({error})");
+            log::warn!("Rust Edition: title panorama unavailable ({error})");
             Self {
                 size: 1,
                 pixels: [96, 110, 111, 255].repeat(6),

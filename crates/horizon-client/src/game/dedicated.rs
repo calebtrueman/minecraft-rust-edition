@@ -340,7 +340,7 @@ impl Game<'_> {
                 "Worker-Main-1",
                 "WARN",
                 &format!(
-                    "Horizon doesn't generate the {preset} world preset yet: using minecraft:normal"
+                    "Rust Edition doesn't generate the {preset} world preset yet: using minecraft:normal"
                 ),
             );
         }

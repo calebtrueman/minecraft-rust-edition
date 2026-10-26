@@ -299,7 +299,7 @@ impl Game<'_> {
                 entry.accept_textures = setting;
             }
             if let Err(e) = servers::save(&file, &list) {
-                log::warn!("Horizon: could not save {}: {e}", file.display());
+                log::warn!("Rust Edition: could not save {}: {e}", file.display());
             }
         }
         Ok(())
@@ -350,7 +350,7 @@ impl Game<'_> {
             match download::Queue::open(dir) {
                 Ok(queue) => state.queue = Some(queue),
                 Err(e) => {
-                    log::error!("Horizon: failed to open the download queue: {e}");
+                    log::error!("Rust Edition: failed to open the download queue: {e}");
                     // Every request failed, as the notifier would hear it.
                     let (progress, events) = std::sync::mpsc::channel();
                     for _ in &requests {
@@ -387,14 +387,14 @@ impl Game<'_> {
             .map(|(id, path)| packs::server_pack(*id, path))
             .collect();
         let Some(packs) = packs else {
-            log::warn!("Horizon: invalid pack metadata in a server pack, ignoring all");
+            log::warn!("Rust Edition: invalid pack metadata in a server pack, ignoring all");
             return false;
         };
         self.server_packs.active = packs;
         match self.reload_selected_packs() {
             Ok(()) => true,
             Err(e) => {
-                log::warn!("Horizon: server resource pack reload failed: {e}");
+                log::warn!("Rust Edition: server resource pack reload failed: {e}");
                 false
             }
         }

@@ -465,7 +465,7 @@ impl Options {
                     o.player_name = Some(session.name.clone());
                     horizon_client::auth::set_current(session);
                 }
-                Err(e) => eprintln!("Horizon: not signed in: {e}"),
+                Err(e) => eprintln!("Rust Edition: not signed in: {e}"),
             }
         }
         Ok(Some(o))
@@ -11367,7 +11367,7 @@ impl Game<'_> {
     }
     fn update_world(&mut self) {
         if let Err(e) = self.poll_remote() {
-            log::warn!("Horizon: {e}");
+            log::warn!("Rust Edition: {e}");
         }
         self.prepare_lod();
         if self.lod.is_some() {
@@ -11433,7 +11433,7 @@ impl Game<'_> {
                     .save_later(&modified, self.pack.assets.registry, self.res.biomes())
             })
         {
-            log::warn!("Horizon: failed to save unloaded chunks: {e}");
+            log::warn!("Rust Edition: failed to save unloaded chunks: {e}");
         }
         if let Some(renderer) = self.renderer.as_mut() {
             let g = &self.settings.horizon;
@@ -12325,7 +12325,7 @@ impl ApplicationHandler for Game<'_> {
                                     format!(", cpu {:.1} ms", (end - start).as_secs_f32() * 1000.0)
                                 });
                             log::info!(
-                                "Horizon: slow frame {cpu:.1} ms{worked} ({steps} ticks): {}",
+                                "Rust Edition: slow frame {cpu:.1} ms{worked} ({steps} ticks): {}",
                                 horizon_client::spans::describe(&spans)
                             );
                         }
@@ -12389,7 +12389,7 @@ impl ApplicationHandler for Game<'_> {
                         if self.frames == 0 {
                             // The launcher times Play to this line (launcher/src/perf.rs).
                             log::info!(
-                                "Horizon: first frame after {} ms",
+                                "Rust Edition: first frame after {} ms",
                                 self.started.elapsed().as_millis()
                             );
                         }
@@ -12493,7 +12493,7 @@ impl ApplicationHandler for Game<'_> {
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
         self.pad_close_output();
         if let Err(e) = self.save_for_exit() {
-            log::warn!("Horizon: failed to save the world on exit: {e}");
+            log::warn!("Rust Edition: failed to save the world on exit: {e}");
         }
         self.finish_perf();
     }
@@ -13002,7 +13002,7 @@ impl Game<'_> {
             ));
         }
         self.pending_entry = Some(entry);
-        log::info!("Horizon: world entry waiting for world resources");
+        log::info!("Rust Edition: world entry waiting for world resources");
         Ok(true)
     }
 
@@ -13065,7 +13065,7 @@ impl Game<'_> {
     fn join_world_rest(&mut self) -> Result<()> {
         if self.rest_loader.is_some() {
             let waited = Instant::now();
-            log::info!("Horizon: waiting for world resources");
+            log::info!("Rust Edition: waiting for world resources");
             while self.rest_loader.is_some() {
                 self.poll_world_rest()?;
                 if self.rest_loader.is_some() {
@@ -13073,7 +13073,7 @@ impl Game<'_> {
                 }
             }
             log::info!(
-                "Horizon: world resources joined after {} ms",
+                "Rust Edition: world resources joined after {} ms",
                 waited.elapsed().as_millis()
             );
         }
@@ -13181,7 +13181,9 @@ fn load_resources(
         // Minecraft.rollbackResourcePacks: the packs' textures don't fit, start
         // with the game's own resources.
         Err(e) if root != vanilla_root => {
-            log::warn!("Horizon: resource packs failed to load ({e}); using the default resources");
+            log::warn!(
+                "Rust Edition: resource packs failed to load ({e}); using the default resources"
+            );
             pack_error = Some(e.to_string());
             root = vanilla_root.to_path_buf();
             None
@@ -13192,7 +13194,7 @@ fn load_resources(
         if menu {
             horizon_client::telemetry::mark_ui_ready();
             log::info!(
-                "Horizon: UI bundle ready after {} ms",
+                "Rust Edition: UI bundle ready after {} ms",
                 started.elapsed().as_millis()
             );
             publish(ui, &root);
@@ -13210,7 +13212,9 @@ fn load_resources(
         // Minecraft.rollbackResourcePacks: the packs break loading, start
         // with the game's own resources.
         Err(e) if root != vanilla_root => {
-            log::warn!("Horizon: resource packs failed to load ({e}); using the default resources");
+            log::warn!(
+                "Rust Edition: resource packs failed to load ({e}); using the default resources"
+            );
             pack_error = Some(e.to_string());
             root = vanilla_root.to_path_buf();
             let assets = Assets::load(vanilla_root)?;
@@ -13232,7 +13236,7 @@ fn load_resources(
         if menu {
             horizon_client::telemetry::mark_ui_ready();
             log::info!(
-                "Horizon: UI bundle ready after {} ms",
+                "Rust Edition: UI bundle ready after {} ms",
                 started.elapsed().as_millis()
             );
             publish(ui, &root);
@@ -13310,7 +13314,7 @@ fn load_resources(
     if menu {
         horizon_client::telemetry::mark_core_ready();
         log::info!(
-            "Horizon: core-ready after {} ms",
+            "Rust Edition: core-ready after {} ms",
             started.elapsed().as_millis()
         );
     }
@@ -13321,7 +13325,7 @@ fn load_resources(
     let renderer_cpu = menu.then(|| prepare_renderer_textures(&pack));
     if menu {
         log::info!(
-            "Horizon: handoff CPU resources prepared on worker in {} ms",
+            "Rust Edition: handoff CPU resources prepared on worker in {} ms",
             prepared_at.elapsed().as_millis()
         );
     }
@@ -13350,7 +13354,7 @@ fn load_resources(
                 progress.set(9);
                 horizon_client::telemetry::mark_rest_ready();
                 log::info!(
-                    "Horizon: rest-ready after {} ms",
+                    "Rust Edition: rest-ready after {} ms",
                     started.elapsed().as_millis()
                 );
                 Ok(())
@@ -13410,7 +13414,7 @@ fn load_world_rest(
     let recipes = Recipes::load(root, &items)?;
     let transformers = horizon_client::block_transform::Transformers::load(root, assets.registry)?;
     log::info!(
-        "Horizon: resources loaded in {:.1}s; {} block states, {} items, {} biomes; {} worker threads",
+        "Rust Edition: resources loaded in {:.1}s; {} block states, {} items, {} biomes; {} worker threads",
         started.elapsed().as_secs_f32(),
         facts.states.len(),
         items.items.len(),
@@ -13876,7 +13880,7 @@ impl Loading {
     /// and title panorama.
     fn set_ui(&mut self, gui: UiResources, root: PathBuf) {
         log::info!(
-            "Horizon: loading the title artwork after {} ms",
+            "Rust Edition: loading the title artwork after {} ms",
             self.started.elapsed().as_millis()
         );
         self.menu.set_root(root, &self.settings);
@@ -13940,13 +13944,13 @@ impl Loading {
                     self.menu.perf.title_shown()
                 }
                 Ok(_) => {}
-                Err(e) => log::warn!("Horizon: loading screen frame failed: {e}"),
+                Err(e) => log::warn!("Rust Edition: loading screen frame failed: {e}"),
             }
         }
         if !self.shown {
             self.shown = true;
             log::info!(
-                "Horizon: loading screen shown after {} ms",
+                "Rust Edition: loading screen shown after {} ms",
                 self.started.elapsed().as_millis()
             );
         }
@@ -13975,7 +13979,7 @@ impl Loading {
             self.settings.horizon.api,
         )?;
         log::info!(
-            "Horizon: world renderer ready after {} ms",
+            "Rust Edition: world renderer ready after {} ms",
             self.started.elapsed().as_millis()
         );
         let renderer_ms = renderer_at.elapsed().as_millis();
@@ -14016,7 +14020,7 @@ impl Loading {
         game.apply_settings();
         game.previous = Instant::now();
         log::info!(
-            "Horizon: startup handoff {} ms (renderer {} ms, start_game {} ms)",
+            "Rust Edition: startup handoff {} ms (renderer {} ms, start_game {} ms)",
             handoff_at.elapsed().as_millis(),
             renderer_ms,
             game_ms
@@ -14203,7 +14207,7 @@ pub fn run() -> Result<()> {
     let mut pack_error = None;
     options.resources = packs::startup_root(&vanilla_root, &early_settings.resource_packs, &[])
         .unwrap_or_else(|e| {
-            log::warn!("Horizon: resource packs not applied: {e}");
+            log::warn!("Rust Edition: resource packs not applied: {e}");
             pack_error = Some(e.to_string());
             vanilla_root.clone()
         });

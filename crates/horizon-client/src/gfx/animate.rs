@@ -109,7 +109,7 @@ impl SpriteAnimator {
             let bytes: u64 = chains.iter().map(|(chain, _)| chain.len() as u64).sum();
             if bytes > limit {
                 log::warn!(
-                    "Horizon: layer {}'s animation ({bytes} bytes) does not fit in a storage buffer; it stays still",
+                    "Rust Edition: layer {}'s animation ({bytes} bytes) does not fit in a storage buffer; it stays still",
                     animation.layer
                 );
                 continue;
@@ -386,7 +386,7 @@ fn pipeline(device: &wgpu::Device) -> Option<wgpu::ComputePipeline> {
     match internal.or(pollster::block_on(validation.pop())) {
         None => Some(pipeline),
         Some(e) => {
-            log::warn!("Horizon renderer: animated sprites drawn on the CPU ({e})");
+            log::warn!("Rust Edition renderer: animated sprites drawn on the CPU ({e})");
             None
         }
     }

@@ -791,7 +791,7 @@ struct Opened {
 fn describe_adapter(adapter: &wgpu::Adapter) {
     let info = adapter.get_info();
     log::info!(
-        "Horizon renderer: {} ({:?}, {:?})",
+        "Rust Edition renderer: {} ({:?}, {:?})",
         info.name,
         info.backend,
         info.device_type
@@ -861,7 +861,10 @@ async fn open_device(
     for (attempt, backends) in order.iter().copied().enumerate() {
         let name = backends_name(backends);
         if attempt > 0 {
-            log::warn!("Horizon renderer: trying {name} ({})", failures.join("; "));
+            log::warn!(
+                "Rust Edition renderer: trying {name} ({})",
+                failures.join("; ")
+            );
         }
         let instance = wgpu::Instance::new(instance_descriptor(backends));
         let surface = if offscreen {
@@ -957,20 +960,20 @@ async fn open_device(
 /// Vulkan is loaded at run time (the game links no graphics library), so a
 /// missing driver shows here rather than as a missing-DLL dialog.
 #[cfg(target_os = "windows")]
-const NO_GPU_DRIVER: &str = "No graphics driver with Vulkan, DirectX 12 or OpenGL found: Horizon needs \
+const NO_GPU_DRIVER: &str = "No graphics driver with Vulkan, DirectX 12 or OpenGL found: Rust Edition needs \
      a GPU driver with one of them. Install the latest driver for your NVIDIA, AMD or Intel GPU and \
      start the game again";
 #[cfg(target_os = "macos")]
 const NO_GPU_DRIVER: &str = "No Metal graphics device found";
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-const NO_GPU_DRIVER: &str = "No Vulkan or OpenGL graphics driver found: Horizon needs the Vulkan loader \
+const NO_GPU_DRIVER: &str = "No Vulkan or OpenGL graphics driver found: Rust Edition needs the Vulkan loader \
      (libvulkan.so.1) and a Vulkan driver for your GPU (Mesa's, or NVIDIA's), or OpenGL through EGL";
 /// Logs a step of the renderer's start, for a native crash in the graphics
 /// driver: it leaves no panic or crash report, so the log's last line is the
 /// only sign of where the game stopped. The log file is written unbuffered;
 /// the flush is for loggers that buffer.
 fn startup_step(step: std::fmt::Arguments) {
-    log::info!("Horizon renderer: {step}");
+    log::info!("Rust Edition renderer: {step}");
     log::logger().flush();
 }
 /// How far the first frame on a new device got, for `startup_step`.
@@ -1140,7 +1143,7 @@ impl Renderer {
         };
         let sprite_arrays = layers.div_ceil(split).max(1);
         if sprite_arrays > 1 {
-            log::info!("Horizon: {layers} block textures in {sprite_arrays} arrays");
+            log::info!("Rust Edition: {layers} block textures in {sprite_arrays} arrays");
         }
         let sprite_constants = [
             ("SPRITE_ARRAYS", f64::from(sprite_arrays)),

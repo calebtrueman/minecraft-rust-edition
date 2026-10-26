@@ -74,7 +74,7 @@ impl Pads {
             }
             Err(gilrs::Error::NotImplemented(_)) => None,
             Err(e) => {
-                log::warn!("Horizon: controllers are unavailable: {e}");
+                log::warn!("Rust Edition: controllers are unavailable: {e}");
                 None
             }
         };
@@ -380,7 +380,7 @@ impl Game<'_> {
                 let end = Instant::now() + Duration::from_millis(u64::from(pulse.millis) + 50);
                 self.pad.devices.rumbles.push((effect, end));
             }
-            Err(e) => log::debug!("Horizon: controller vibration: {e}"),
+            Err(e) => log::debug!("Rust Edition: controller vibration: {e}"),
         }
     }
 

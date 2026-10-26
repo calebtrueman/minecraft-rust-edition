@@ -58,7 +58,7 @@ impl Game<'_> {
     /// under the warning screen, it is what Back returns to.
     pub(super) fn show_dialog(&mut self, tag: &Tag) {
         let Some(dialog) = Dialog::parse(tag) else {
-            log::warn!("Horizon: failed to show dialog for data {tag:?}");
+            log::warn!("Rust Edition: failed to show dialog for data {tag:?}");
             return;
         };
         let values = dialog.inputs.iter().map(|i| i.control.initial()).collect();
@@ -144,7 +144,7 @@ impl Game<'_> {
                     self.send_chat(&format!("/{command}"));
                 } else {
                     log::warn!(
-                        "Horizon: commands are not supported in configuration, trying to run '{command}'"
+                        "Rust Edition: commands are not supported in configuration, trying to run '{command}'"
                     );
                 }
             }
@@ -153,7 +153,7 @@ impl Game<'_> {
                 use horizon_client::clipboard::Clipboard;
                 self.clipboard.set(&value);
             }
-            Some(other) => log::info!("Horizon: dialog action {other:?} is not supported yet"),
+            Some(other) => log::info!("Rust Edition: dialog action {other:?} is not supported yet"),
             None => {}
         }
         if !self.dialog_open() {
@@ -178,7 +178,7 @@ impl Game<'_> {
                 });
                 match found {
                     Some(tag) => self.show_dialog(&tag),
-                    None => log::warn!("Horizon: unknown dialog {id}"),
+                    None => log::warn!("Rust Edition: unknown dialog {id}"),
                 }
             }
             tag => self.show_dialog(tag),
@@ -200,7 +200,7 @@ impl Game<'_> {
                     .and_then(|r| r.registries.data("minecraft:dialog", *id).cloned());
                 match tag {
                     Some(tag) => self.show_dialog(&tag),
-                    None => log::warn!("Horizon: unknown dialog {id}"),
+                    None => log::warn!("Rust Edition: unknown dialog {id}"),
                 }
             }
         }

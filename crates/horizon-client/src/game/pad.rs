@@ -160,7 +160,7 @@ impl Game<'_> {
 
     fn pad_button_logged(&mut self, event_loop: &ActiveEventLoop, button: Button, down: bool) {
         if let Err(e) = self.pad_button(event_loop, button, down) {
-            log::warn!("Horizon: controller {}: {e}", button.name());
+            log::warn!("Rust Edition: controller {}: {e}", button.name());
         }
     }
 

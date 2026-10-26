@@ -170,7 +170,7 @@ impl Default for ServerPacks {
 }
 impl ServerPacks {
     fn report(&mut self, id: u128, status: i32) {
-        log::debug!("Horizon: server pack {id:032x} changed status to {status}");
+        log::debug!("Rust Edition: server pack {id:032x} changed status to {status}");
         if self.reporting {
             self.replies.push((id, status));
         }

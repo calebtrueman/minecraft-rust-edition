@@ -31,7 +31,7 @@ pub fn open_folder(dir: &Path) {
         "xdg-open"
     };
     if let Err(e) = std::process::Command::new(program).arg(dir).spawn() {
-        log::warn!("Horizon: could not open {}: {e}", dir.display());
+        log::warn!("Rust Edition: could not open {}: {e}", dir.display());
     }
 }
 /// The resource root to load from, given the vanilla root, the selection and
@@ -124,7 +124,7 @@ impl Game<'_> {
             return;
         }
         if let Err(e) = self.reload_selected_packs() {
-            log::warn!("Horizon: resource reload failed: {e}");
+            log::warn!("Rust Edition: resource reload failed: {e}");
             if self.screen != super::Screen::Options {
                 self.open_options_at(
                     self.title.is_some(),

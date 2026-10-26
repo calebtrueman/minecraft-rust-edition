@@ -103,12 +103,12 @@ impl VanillaTerrain {
         let unsupported = generator.unsupported_features();
         if !unsupported.is_empty() {
             log::warn!(
-                "Horizon: {} placed features cannot run and will be skipped",
+                "Rust Edition: {} placed features cannot run and will be skipped",
                 unsupported.len()
             );
             if !dir.join("blocks/block-properties.nbt").exists() {
                 log::warn!(
-                    "Horizon: the worldgen bundle lacks the block behavior exports (worldgen/blocks/*.nbt); \
+                    "Rust Edition: the worldgen bundle lacks the block behavior exports (worldgen/blocks/*.nbt); \
                      prepare again (the launcher, or horizon-prepare --prepare) to add them"
                 );
             }
@@ -347,7 +347,10 @@ pub fn shared_data(
     }
     let started = std::time::Instant::now();
     let data = GeneratorData::load(dir, registry)?;
-    log::info!("Horizon: worldgen data loaded in {:?}", started.elapsed());
+    log::info!(
+        "Rust Edition: worldgen data loaded in {:?}",
+        started.elapsed()
+    );
     cache.push((dir.to_owned(), data.clone()));
     Ok(data)
 }
@@ -388,7 +391,7 @@ impl ChunkGenerator for VanillaTerrain {
         match worker.generate_proto(ChunkPos::new(x, z)) {
             Ok(chunk) => Box::new(VanillaProto::Ready(Box::new(chunk))),
             Err(e) => {
-                log::warn!("Horizon: generating chunk {x} {z} failed: {e}");
+                log::warn!("Rust Edition: generating chunk {x} {z} failed: {e}");
                 Box::new(VanillaProto::Failed(x, z))
             }
         }
@@ -419,7 +422,7 @@ impl ChunkGenerator for VanillaTerrain {
                 Err(_) => unreachable!(),
             };
             if let Err(e) = worker.decorate(&mut array) {
-                log::warn!("Horizon: decorating chunk failed: {e}");
+                log::warn!("Rust Edition: decorating chunk failed: {e}");
             }
             for (slot, chunk) in region.iter_mut().zip(array) {
                 *slot = Box::new(VanillaProto::Ready(Box::new(chunk)));

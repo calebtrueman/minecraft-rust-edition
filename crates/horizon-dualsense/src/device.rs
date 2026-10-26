@@ -58,7 +58,7 @@ impl DualSense {
             None if bluetooth_allowed() => wireless.first()?,
             None => {
                 if !wireless.is_empty() && !SKIPPED.swap(true, Ordering::Relaxed) {
-                    log::info!("Horizon: no DualSense output over Bluetooth on this system");
+                    log::info!("Rust Edition: no DualSense output over Bluetooth on this system");
                 }
                 return None;
             }
@@ -156,7 +156,7 @@ impl Link {
         let thread = std::thread::Builder::new()
             .name("dualsense".into())
             .spawn(move || Writer::new(shown).run(rx))
-            .map_err(|e| log::warn!("Horizon: DualSense output: {e}"))
+            .map_err(|e| log::warn!("Rust Edition: DualSense output: {e}"))
             .ok();
         Link {
             tx: Some(tx),
@@ -355,7 +355,7 @@ impl Writer {
         let found = match api {
             Ok(api) => DualSense::open(api),
             Err(e) => {
-                log::warn!("Horizon: DualSense output: {e}");
+                log::warn!("Rust Edition: DualSense output: {e}");
                 None
             }
         };
@@ -377,7 +377,7 @@ impl Writer {
             }
             Some(Err(e)) => {
                 // No access (Linux without a udev rule): vibration stays with gilrs.
-                log::info!("Horizon: the DualSense can't be opened for output: {e}");
+                log::info!("Rust Edition: the DualSense can't be opened for output: {e}");
                 self.scans_left = 0;
             }
             None => {}

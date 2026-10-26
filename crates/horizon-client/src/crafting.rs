@@ -1212,7 +1212,7 @@ impl Recipes {
             let v: Value = match serde_json::from_slice(&fs::read(&path)?) {
                 Ok(v) => v,
                 Err(e) => {
-                    log::warn!("Horizon: recipe {name} not loaded: {e}");
+                    log::warn!("Rust Edition: recipe {name} not loaded: {e}");
                     continue;
                 }
             };

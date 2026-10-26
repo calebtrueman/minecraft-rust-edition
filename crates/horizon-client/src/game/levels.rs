@@ -353,7 +353,7 @@ impl Game<'_> {
                     format!(", cpu {:.1} ms", (end - start).as_secs_f32() * 1000.0)
                 });
             log::info!(
-                "Horizon: slow tick {wall:.1} ms{cpu} ({} mobs): {}",
+                "Rust Edition: slow tick {wall:.1} ms{cpu} ({} mobs): {}",
                 self.mobs.len(),
                 horizon_client::spans::describe(&spans)
             );

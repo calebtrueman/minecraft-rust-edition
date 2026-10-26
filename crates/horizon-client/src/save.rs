@@ -1313,7 +1313,7 @@ pub fn encode_with(
                 Some(tag) => Some((start.name.as_str().into(), tag)),
                 None => {
                     log::warn!(
-                        "Horizon: structure start {} not saved: one of its pieces cannot be",
+                        "Rust Edition: structure start {} not saved: one of its pieces cannot be",
                         start.name
                     );
                     None
@@ -1908,7 +1908,7 @@ fn resolve_poi(
         return Some(record.clone());
     };
     let old = read_region_record(root, cache, "poi", x, z).unwrap_or_else(|e| {
-        log::warn!("Horizon: could not read the poi record of chunk {x} {z}: {e}");
+        log::warn!("Rust Edition: could not read the poi record of chunk {x} {z}: {e}");
         None
     });
     let tag = match (encode_poi(chunk, tables), old) {
@@ -2218,7 +2218,7 @@ impl SaveDir {
                     let result = write_region_records(&root, cache, folder, &records);
                     if let Err(e) = &result {
                         let message = format!("failed to write {folder} files: {e}");
-                        log::warn!("Horizon: {message}");
+                        log::warn!("Rust Edition: {message}");
                         *outstanding.error.lock().unwrap() = Some(message);
                     }
                     // Keep failed snapshots readable; never report them as durable.
@@ -3853,7 +3853,7 @@ impl<G: ChunkGenerator> ChunkGenerator for Persistent<G> {
             .save
             .save_protos(&saved, self.registry.registry, &self.biomes)
         {
-            log::warn!("Horizon: failed to save proto chunks: {e}");
+            log::warn!("Rust Edition: failed to save proto chunks: {e}");
         }
     }
     fn save_finished(&self, mut chunk: Chunk) {
@@ -3867,7 +3867,11 @@ impl<G: ChunkGenerator> ChunkGenerator for Persistent<G> {
             .save_later(&[Arc::new(chunk)], self.registry.registry, &self.biomes)
             .and_then(|_| self.save.save_entities_later(vec![(key, entities)]));
         if let Err(e) = saved {
-            log::warn!("Horizon: failed to save chunk {} {}: {e}", key.0, key.1);
+            log::warn!(
+                "Rust Edition: failed to save chunk {} {}: {e}",
+                key.0,
+                key.1
+            );
         }
     }
     fn decorates(&self) -> bool {

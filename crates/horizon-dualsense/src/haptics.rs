@@ -46,7 +46,7 @@ impl Haptics {
                 |e| log::debug!("DualSense haptics: {e}"),
                 None,
             )
-            .map_err(|e| log::info!("Horizon: DualSense haptics unavailable: {e}"))
+            .map_err(|e| log::info!("Rust Edition: DualSense haptics unavailable: {e}"))
             .ok()?;
         stream.play().ok()?;
         log::info!("DualSense HD haptics through its audio device");

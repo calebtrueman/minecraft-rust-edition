@@ -243,7 +243,7 @@ impl Writer {
                         {
                             let _ = writeln!(
                                 stderr.lock(),
-                                "Horizon: could not roll over the log: {e}"
+                                "Rust Edition: could not roll over the log: {e}"
                             );
                         }
                         self.date = date;
@@ -362,14 +362,14 @@ pub fn init(home: &Path, main_thread: &'static str) {
         Ok(Some(latest)) => Some(latest),
         Ok(None) => {
             eprintln!(
-                "Horizon: another game is writing {}; this one logs to the terminal only",
+                "Rust Edition: another game is writing {}; this one logs to the terminal only",
                 dir.join("latest.log").display()
             );
             None
         }
         Err(e) => {
             eprintln!(
-                "Horizon: could not open {}: {e}",
+                "Rust Edition: could not open {}: {e}",
                 dir.join("latest.log").display()
             );
             None
@@ -386,7 +386,7 @@ pub fn init(home: &Path, main_thread: &'static str) {
             .name("Log writer".into())
             .spawn(move || writer.run(receive))
         {
-            eprintln!("Horizon: could not start the log writer: {e}");
+            eprintln!("Rust Edition: could not start the log writer: {e}");
         }
         Logger {
             out,

@@ -288,7 +288,7 @@ impl Game<'_> {
         }
         self.join_world_rest()?;
         if let Err(error) = self.join_server(address, name, None, cookies) {
-            log::warn!("Horizon: could not join server: {error}");
+            log::warn!("Rust Edition: could not join server: {error}");
             if self.title.is_none() {
                 self.title = Some(horizon_client::title::Title::new(
                     std::env::current_dir()?.join("saves"),
@@ -800,7 +800,9 @@ impl Game<'_> {
                             break;
                         }
                         Next::Lost => {
-                            log::warn!("Horizon: the chunk decoder stopped; a column is missing");
+                            log::warn!(
+                                "Rust Edition: the chunk decoder stopped; a column is missing"
+                            );
                             continue;
                         }
                     };
@@ -868,7 +870,7 @@ impl Game<'_> {
                     if let Some(r) = self.remote.as_mut() {
                         r.decode_errors += 1;
                         if r.decode_errors <= 20 {
-                            log::warn!("Horizon: skipped undecodable packet {e}");
+                            log::warn!("Rust Edition: skipped undecodable packet {e}");
                         }
                     }
                 }
@@ -876,7 +878,7 @@ impl Game<'_> {
                     reason,
                     from_server,
                 } => {
-                    log::info!("Horizon: disconnected: {reason}");
+                    log::info!("Rust Edition: disconnected: {reason}");
                     // ClientboundTransferPacket left a target: connect there
                     // instead of showing the disconnect, the stored cookies
                     // carried over (ClientCommonPacketListenerImpl.
@@ -5076,7 +5078,7 @@ impl Game<'_> {
                 }));
                 self.chat_line(
                     horizon_client::text::Text::literal(format!(
-                        "(Horizon cannot show {menu} screens yet)"
+                        "(Rust Edition cannot show {menu} screens yet)"
                     )),
                     horizon_client::chat::ChatSource::Client,
                 );

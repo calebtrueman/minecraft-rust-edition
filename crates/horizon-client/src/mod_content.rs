@@ -1270,11 +1270,13 @@ pub fn resource_root(base: &Path, mods: &[ContentMod], cache: &Path) -> Result<P
     if fs::read(out.join(STAMP)).is_ok_and(|s| s == stamp.as_bytes()) {
         // A reused root warns as the build did.
         let warnings = fs::read_to_string(out.join(WARNINGS)).unwrap_or_default();
-        warnings.lines().for_each(|w| log::warn!("Horizon: {w}"));
+        warnings
+            .lines()
+            .for_each(|w| log::warn!("Rust Edition: {w}"));
         return Ok(out);
     }
     for warning in build(base, mods, &out)? {
-        log::warn!("Horizon: {warning}");
+        log::warn!("Rust Edition: {warning}");
     }
     fs::write(out.join(STAMP), stamp)?;
     Ok(out)

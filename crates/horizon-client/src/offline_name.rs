@@ -33,7 +33,7 @@ pub fn load_or_create(dir: &Path) -> String {
     let name = generate(seed());
     if let Err(e) = fs::write(&path, format!("{KEY}{name}\n")) {
         log::warn!(
-            "Horizon: could not keep the player name in {}: {e}",
+            "Rust Edition: could not keep the player name in {}: {e}",
             path.display()
         );
     }

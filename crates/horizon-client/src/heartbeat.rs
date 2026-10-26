@@ -34,7 +34,7 @@ pub fn start() {
         Ok(handle) => {
             let _ = PINGER.set(handle.thread().clone());
         }
-        Err(e) => log::warn!("Horizon: no live count ping: {e}"),
+        Err(e) => log::warn!("Rust Edition: no live count ping: {e}"),
     }
 }
 
@@ -62,7 +62,9 @@ fn run(endpoint: &str) {
             Err(e) => {
                 // Said once, not every minute the server is away.
                 if !failed {
-                    log::info!("Horizon: the live count ping failed ({e}); trying again later");
+                    log::info!(
+                        "Rust Edition: the live count ping failed ({e}); trying again later"
+                    );
                 }
                 failed = true;
                 wait = (wait * 2).min(MAX_WAIT);

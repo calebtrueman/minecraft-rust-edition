@@ -1002,7 +1002,7 @@ impl Game<'_> {
         let keys: HashSet<(i32, i32)> = unloaded.iter().map(|c| (c.x, c.z)).collect();
         let chunks = self.entity_chunks(&keys, true);
         if let Err(e) = self.save.save_entities_later(chunks) {
-            log::warn!("Horizon: failed to save entities: {e}");
+            log::warn!("Rust Edition: failed to save entities: {e}");
         }
     }
     /// Leaving a dimension: its entities are saved with it.

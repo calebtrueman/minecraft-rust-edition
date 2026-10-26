@@ -111,7 +111,7 @@ impl Game<'_> {
                 &mut title.mode
         {
             log::info!(
-                "Horizon: reconnecting to {} in {} s",
+                "Rust Edition: reconnecting to {} in {} s",
                 horizon_client::net::shown_address(&retry.address),
                 retry.seconds_left(std::time::Instant::now())
             );

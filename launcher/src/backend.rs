@@ -1820,19 +1820,28 @@ pub fn crash_summary(report: &str) -> Option<String> {
 }
 
 /// The line the game prints when it has drawn its first frame.
-pub const GAME_FIRST_FRAME: &str = "Horizon: first frame";
+pub const GAME_FIRST_FRAME: &str = "Rust Edition: first frame";
+const LEGACY_GAME_FIRST_FRAME: &str = "Horizon: first frame";
+
+/// Whether a game's log says it has drawn its first frame, including older builds.
+pub fn is_game_first_frame_line(line: &str) -> bool {
+    line.starts_with(GAME_FIRST_FRAME) || line.starts_with(LEGACY_GAME_FIRST_FRAME)
+}
 
 /// Whether a game's output ends in a crash while its Vulkan renderer started: an adapter line
-/// (`Horizon renderer: <GPU> (Vulkan, <type>)`) and no first frame. A native crash in a graphics
+/// (`Rust Edition renderer: <GPU> (Vulkan, <type>)`) and no first frame. A native crash in a graphics
 /// driver leaves no crash report, only those lines (#746).
 pub fn vulkan_start_crashed<S: AsRef<str>>(lines: impl IntoIterator<Item = S>) -> bool {
     let mut vulkan = false;
     for line in lines {
         let line = line.as_ref();
-        if line.starts_with(GAME_FIRST_FRAME) {
+        if is_game_first_frame_line(line) {
             return false;
         }
-        if let Some(adapter) = line.strip_prefix("Horizon renderer: ") {
+        if let Some(adapter) = line
+            .strip_prefix("Rust Edition renderer: ")
+            .or_else(|| line.strip_prefix("Horizon renderer: "))
+        {
             // The adapter line, not one of the start's steps: "<GPU> (<backend>, <type>)".
             if adapter.ends_with(')') && adapter.contains(" (") {
                 vulkan = adapter.contains(" (Vulkan, ");
@@ -3016,18 +3025,27 @@ mod tests {
     #[test]
     fn a_crash_after_the_vulkan_adapter_line_and_before_the_first_frame_is_a_start_crash() {
         let start = [
+            "Rust Edition: resources loaded in 11.3s; 35723 block states, 1658 items, 67 biomes",
+            "Rust Edition renderer: Intel(R) HD Graphics 530 (Vulkan, IntegratedGpu)",
+        ];
+        let legacy_start = [
             "Horizon: resources loaded in 11.3s; 35723 block states, 1658 items, 67 biomes",
             "Horizon renderer: Intel(R) HD Graphics 530 (Vulkan, IntegratedGpu)",
         ];
         assert!(vulkan_start_crashed(start));
+        assert!(vulkan_start_crashed(legacy_start));
         // A step line after the adapter keeps it a start crash.
-        let step = [start[1], "Horizon renderer: creating the pipelines"];
+        let step = [start[1], "Rust Edition renderer: creating the pipelines"];
         assert!(vulkan_start_crashed(step));
+        let legacy_step = [legacy_start[1], "Horizon renderer: creating the pipelines"];
+        assert!(vulkan_start_crashed(legacy_step));
         // A crash after the first frame is the game's, not the renderer start's.
-        let later = [start[1], "Horizon: first frame after 812 ms"];
+        let later = [start[1], "Rust Edition: first frame after 812 ms"];
         assert!(!vulkan_start_crashed(later));
+        let legacy_later = [legacy_start[1], "Horizon: first frame after 812 ms"];
+        assert!(!vulkan_start_crashed(legacy_later));
         // Already on DirectX 12, or no renderer yet: nothing to switch.
-        let dx12 = ["Horizon renderer: Intel(R) HD Graphics 530 (Dx12, IntegratedGpu)"];
+        let dx12 = ["Rust Edition renderer: Intel(R) HD Graphics 530 (Dx12, IntegratedGpu)"];
         assert!(!vulkan_start_crashed(dx12));
         assert!(!vulkan_start_crashed(&start[..1]));
         // Vulkan failed to open and DirectX 12 took over: its line is the last adapter.

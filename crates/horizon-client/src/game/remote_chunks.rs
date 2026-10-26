@@ -186,7 +186,7 @@ impl ChunkDecoder {
                 }
             });
         if let Err(e) = spawned {
-            log::warn!("Horizon: no chunk decoder thread ({e}); chunks decode in the frame");
+            log::warn!("Rust Edition: no chunk decoder thread ({e}); chunks decode in the frame");
         }
         Self { jobs, done }
     }
@@ -244,7 +244,7 @@ impl Game<'_> {
         let chunk = match column {
             Ok(chunk) => chunk,
             Err(e) => {
-                log::warn!("Horizon: chunk {} {}: {e}", p.x, p.z);
+                log::warn!("Rust Edition: chunk {} {}: {e}", p.x, p.z);
                 return;
             }
         };

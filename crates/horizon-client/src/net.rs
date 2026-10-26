@@ -632,19 +632,19 @@ fn run(
                                     )
                                 {
                                     log::warn!(
-                                        "Horizon: could not send the secure chat session: {error}"
+                                        "Rust Edition: could not send the secure chat session: {error}"
                                     );
                                 }
                             }
                             Ok(None) => {}
                             Err(error) => {
                                 log::warn!(
-                                    "Horizon: could not create a secure chat session: {error}"
+                                    "Rust Edition: could not create a secure chat session: {error}"
                                 );
                             }
                         }
                     }
-                    Err(error) => log::warn!("Horizon: secure chat is unavailable: {error}"),
+                    Err(error) => log::warn!("Rust Edition: secure chat is unavailable: {error}"),
                 },
             );
     }

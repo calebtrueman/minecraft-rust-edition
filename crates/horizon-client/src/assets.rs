@@ -106,7 +106,9 @@ impl Assets {
             root.join("horizon-resources.json"),
         )?))?;
         if manifest["data_version"].as_i64() != Some(i64::from(DATA_VERSION)) {
-            return Err(invalid("resources do not match Horizon's pinned data version").into());
+            return Err(
+                invalid("resources do not match Rust Edition's pinned data version").into(),
+            );
         }
         let (registry, flags) =
             BlockRegistry::from_facts_json_with_flags(File::open(root.join("facts.json"))?)?;

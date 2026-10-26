@@ -61,7 +61,7 @@ impl Behaviours {
                     reference,
                     &mut place_feature,
                 ) {
-                    eprintln!("Horizon: placing a jigsaw piece failed: {e}");
+                    eprintln!("Rust Edition: placing a jigsaw piece failed: {e}");
                 }
             }
         }

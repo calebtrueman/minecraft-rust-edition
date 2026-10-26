@@ -118,7 +118,7 @@ pub fn find(
         }
         None => tags.first().cloned().ok_or_else(|| {
             format!(
-                "no Horizon found: no horizon-client beside horizon-ctl and no version installed by the launcher in {}. Install one with the launcher (horizon-launcher install latest) or pass --game PATH.",
+                "no Rust Edition game found: no horizon-client beside horizon-ctl and no version installed by the launcher in {}. Install one with the launcher (horizon-launcher install latest) or pass --game PATH.",
                 versions.display()
             )
         })?,
@@ -332,7 +332,7 @@ mod tests {
         assert!(
             find(None, None, None, &home)
                 .unwrap_err()
-                .contains("no Horizon found")
+                .contains("no Rust Edition game found")
         );
         fake_version(&home.join("versions"), "v2026.10.13", false);
         assert!(

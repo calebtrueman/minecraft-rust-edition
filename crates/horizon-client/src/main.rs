@@ -1,4 +1,4 @@
-//! Horizon: native Rust client for Minecraft Java Edition 26.3 gameplay.
+//! Rust Edition: native Rust client for Minecraft Java Edition 26.3 gameplay.
 #![forbid(unsafe_code)]
 mod game;
 
