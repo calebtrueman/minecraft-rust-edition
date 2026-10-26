@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Makes a release signing key (docs/security.md, "Signed updates"): the private key goes straight from
 # horizon-release-sign into the `release` environment's secret through a pipe (never on disk, never printed,
-# never in the Agents vault); the public key is printed for crates/horizon-release-sign/release-keys.txt.
+# never committed); the public key is printed for crates/horizon-release-sign/release-keys.txt.
 # Needs a gh login that may write the repository's environment secrets (the maintainer's), and the `release`
 # environment to exist.
 #
@@ -10,7 +10,7 @@
 set -euo pipefail
 secret=${1:-RELEASE_SIGNING_KEY}
 case "$secret" in RELEASE_SIGNING_KEY|RELEASE_SIGNING_KEY_NEXT) ;; *) echo "unknown secret $secret" >&2; exit 2 ;; esac
-repo=${GITHUB_REPOSITORY:-ludovic111/horizon}
+repo=${GITHUB_REPOSITORY:-calebtrueman/minecraft-rust-edition}
 cd "$(dirname "$0")/../.."
 gh api "repos/$repo/environments/release" > /dev/null || {
   echo "The release environment doesn't exist yet: create it first (docs/security.md)." >&2; exit 1; }
