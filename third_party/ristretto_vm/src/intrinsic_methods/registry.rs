@@ -144,61 +144,61 @@ fn lookup_method_signature<'a, F>(
 where
     F: Fn(&str) -> Option<&'a IntrinsicMethod>,
 {
-        // Try to use a stack buffer to avoid heap allocation for typical method signatures
-        // Most Java method signatures are under 256 bytes
-        const STACK_BUFFER_SIZE: usize = 256;
-        let total_len = class_name.len() + 1 + method_name.len() + method_descriptor.len();
+    // Try to use a stack buffer to avoid heap allocation for typical method signatures
+    // Most Java method signatures are under 256 bytes
+    const STACK_BUFFER_SIZE: usize = 256;
+    let total_len = class_name.len() + 1 + method_name.len() + method_descriptor.len();
 
-        if total_len <= STACK_BUFFER_SIZE {
-            // Fast path: use stack buffer for small signatures
-            let mut buffer = [0u8; STACK_BUFFER_SIZE];
-            let mut pos: usize = 0;
+    if total_len <= STACK_BUFFER_SIZE {
+        // Fast path: use stack buffer for small signatures
+        let mut buffer = [0u8; STACK_BUFFER_SIZE];
+        let mut pos: usize = 0;
 
-            let class_end = pos.checked_add(class_name.len())?;
-            buffer
-                .get_mut(pos..class_end)?
-                .copy_from_slice(class_name.as_bytes());
-            pos = class_end;
+        let class_end = pos.checked_add(class_name.len())?;
+        buffer
+            .get_mut(pos..class_end)?
+            .copy_from_slice(class_name.as_bytes());
+        pos = class_end;
 
-            *buffer.get_mut(pos)? = b'.';
-            pos = pos.checked_add(1)?;
+        *buffer.get_mut(pos)? = b'.';
+        pos = pos.checked_add(1)?;
 
-            let method_end = pos.checked_add(method_name.len())?;
-            buffer
-                .get_mut(pos..method_end)?
-                .copy_from_slice(method_name.as_bytes());
-            pos = method_end;
+        let method_end = pos.checked_add(method_name.len())?;
+        buffer
+            .get_mut(pos..method_end)?
+            .copy_from_slice(method_name.as_bytes());
+        pos = method_end;
 
-            let descriptor_end = pos.checked_add(method_descriptor.len())?;
-            buffer
-                .get_mut(pos..descriptor_end)?
-                .copy_from_slice(method_descriptor.as_bytes());
-            pos = descriptor_end;
+        let descriptor_end = pos.checked_add(method_descriptor.len())?;
+        buffer
+            .get_mut(pos..descriptor_end)?
+            .copy_from_slice(method_descriptor.as_bytes());
+        pos = descriptor_end;
 
-            let Some(signature_bytes) = buffer.get(..pos) else {
-                error!(
-                    "Failed to construct method signature for {class_name}.{method_name}{method_descriptor}"
-                );
-                return None;
-            };
-            let Ok(method_signature) = std::str::from_utf8(signature_bytes) else {
-                error!(
-                    "Failed to construct method signature for {class_name}.{method_name}{method_descriptor}"
-                );
-                return None;
-            };
-            lookup(method_signature)
-        } else {
-            // Slow path: fall back to heap allocation for unusually long signatures
-            let mut method_signature = String::with_capacity(
-                class_name.len() + 1 + method_name.len() + method_descriptor.len(),
+        let Some(signature_bytes) = buffer.get(..pos) else {
+            error!(
+                "Failed to construct method signature for {class_name}.{method_name}{method_descriptor}"
             );
-            method_signature.push_str(class_name);
-            method_signature.push('.');
-            method_signature.push_str(method_name);
-            method_signature.push_str(method_descriptor);
-            lookup(method_signature.as_str())
-        }
+            return None;
+        };
+        let Ok(method_signature) = std::str::from_utf8(signature_bytes) else {
+            error!(
+                "Failed to construct method signature for {class_name}.{method_name}{method_descriptor}"
+            );
+            return None;
+        };
+        lookup(method_signature)
+    } else {
+        // Slow path: fall back to heap allocation for unusually long signatures
+        let mut method_signature = String::with_capacity(
+            class_name.len() + 1 + method_name.len() + method_descriptor.len(),
+        );
+        method_signature.push_str(class_name);
+        method_signature.push('.');
+        method_signature.push_str(method_name);
+        method_signature.push_str(method_descriptor);
+        lookup(method_signature.as_str())
+    }
 }
 
 #[cfg(all(test, not(target_family = "wasm")))]

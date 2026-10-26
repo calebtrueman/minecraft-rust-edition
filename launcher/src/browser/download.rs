@@ -1,5 +1,5 @@
 //! Downloads that reach the game folder only when their checksum matches the source's.
-use super::{FileRef, safe_name};
+use super::{safe_name, FileRef};
 use sha1::Sha1;
 use sha2::{Digest, Sha256, Sha512};
 use std::fs;

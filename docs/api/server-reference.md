@@ -8,7 +8,7 @@ Everything `horizon-server` offers a host or a tool: its commands, every `server
 `horizon-server help` prints:
 
 ```text
-horizon-server: host a Horizon (Minecraft Java Edition 26.3) server
+horizon-server: host a Minecraft: Rust Edition (Minecraft Java Edition 26.3) server
 
 Usage: horizon-server [--dir DIR] <command>
 
@@ -60,7 +60,7 @@ Settings live in server.toml; the server writes server.properties from it before
 
 ## `server.toml`
 
-Horizon server settings (docs/server.md). The server writes them into server.properties before every start: edit this file, not that one. Unknown keys are refused. `horizon-server init` writes this file with these defaults; `horizon-server config set SECTION.KEY=VALUE` changes it.
+Minecraft: Rust Edition server settings (docs/server.md). The server writes them into server.properties before every start: edit this file, not that one. Unknown keys are refused. `horizon-server init` writes this file with these defaults; `horizon-server config set SECTION.KEY=VALUE` changes it.
 
 ### `[server]`
 
