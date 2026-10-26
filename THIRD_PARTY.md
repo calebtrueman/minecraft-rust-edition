@@ -14,3 +14,14 @@ It does not make Fabric mods work with the Rust game or renderer by itself.
 
 The crate depends on other Rust packages. Each consuming Cargo workspace records its resolved
 versions in its own `Cargo.lock`.
+
+## Ristretto classloader
+
+Minecraft: Rust Edition also vendors `ristretto_classloader` 0.34.0 in
+[`third_party/ristretto_classloader`](third_party/ristretto_classloader). It comes from the same
+[Ristretto project](https://github.com/theseus-rs/ristretto) and is licensed `Apache-2.0 OR MIT`.
+Both license texts are included beside the source. The source package hash, upstream commit, and
+local file-URL change are listed in
+[`third_party/ristretto_classloader/UPSTREAM.md`](third_party/ristretto_classloader/UPSTREAM.md).
+The local change makes class source URLs work when a path contains spaces or reserved URL
+characters. It does not add Minecraft or Fabric support by itself.

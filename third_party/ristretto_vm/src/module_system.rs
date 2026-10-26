@@ -22,17 +22,20 @@ use crate::Configuration;
 use crate::JavaError::{IllegalAccessError, InaccessibleObjectException};
 use crate::Result;
 use ahash::{AHashMap, AHashSet};
+use ristretto_classfile::ClassFile;
 use ristretto_classloader::Value;
 use ristretto_classloader::module::{
-    AccessCheck, ModuleFinder, ModuleFinderChain, ModulePathFinder, ModuleSource,
-    ResolvedConfiguration, Resolver, SystemModuleFinder,
+    AccessCheck, ModuleDescriptor, ModuleFinder, ModuleFinderChain, ModulePathFinder,
+    ModuleReference, ModuleSource, ResolvedConfiguration, Resolver, SystemModuleFinder,
 };
 use ristretto_gc::sync::RwLock;
 use ristretto_types::ModuleAccess;
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
-use tracing::debug;
+use tracing::{debug, warn};
+use zip::ZipArchive;
 
 // Re-export AccessCheckResult from classloader; this is the canonical location
 pub use ristretto_classloader::module::AccessCheckResult;
@@ -70,6 +73,78 @@ fn resolved_configuration_cell(jimage_path: &Path) -> Arc<ResolvedConfigurationC
     )
 }
 
+/// Reads the `java.base` descriptor from a JMOD-only Java home.
+///
+/// Small runtime images sometimes contain `jmods/java.base.jmod` instead of `lib/modules`.
+/// Ristretto's class loader can already read classes and resources from that JMOD, but module
+/// lookup also needs its descriptor to map packages to `java.base`.
+#[derive(Debug)]
+struct JmodJavaBaseFinder {
+    reference: ModuleReference,
+}
+
+impl JmodJavaBaseFinder {
+    /// Loads `classes/module-info.class` from `jmods/java.base.jmod` when it exists.
+    fn new(java_home: &Path) -> std::result::Result<Option<Self>, String> {
+        const MAX_DESCRIPTOR_BYTES: u64 = 1024 * 1024;
+
+        let jmod_path = java_home.join("jmods").join("java.base.jmod");
+        if !jmod_path.is_file() {
+            return Ok(None);
+        }
+
+        let file = std::fs::File::open(&jmod_path)
+            .map_err(|error| format!("{}: {error}", jmod_path.display()))?;
+        let mut archive =
+            ZipArchive::new(file).map_err(|error| format!("{}: {error}", jmod_path.display()))?;
+        let module_info = archive
+            .by_name("classes/module-info.class")
+            .map_err(|error| format!("{}: {error}", jmod_path.display()))?;
+        if module_info.size() > MAX_DESCRIPTOR_BYTES {
+            return Err(format!(
+                "{} has a module descriptor larger than {MAX_DESCRIPTOR_BYTES} bytes",
+                jmod_path.display()
+            ));
+        }
+        let mut bytes = Vec::new();
+        module_info
+            .take(MAX_DESCRIPTOR_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|error| format!("{}: {error}", jmod_path.display()))?;
+        if bytes.len() as u64 > MAX_DESCRIPTOR_BYTES {
+            return Err(format!(
+                "{} has a module descriptor larger than {MAX_DESCRIPTOR_BYTES} bytes",
+                jmod_path.display()
+            ));
+        }
+
+        let class_file = ClassFile::from_bytes(&bytes).map_err(|error| error.to_string())?;
+        let descriptor =
+            ModuleDescriptor::from_class_file(&class_file).map_err(|error| error.to_string())?;
+        if descriptor.name != JAVA_BASE_MODULE {
+            return Err(format!(
+                "{} describes {}, expected {JAVA_BASE_MODULE}",
+                jmod_path.display(),
+                descriptor.name
+            ));
+        }
+
+        Ok(Some(Self {
+            reference: ModuleReference::new(descriptor, ModuleSource::System, Some(jmod_path)),
+        }))
+    }
+}
+
+impl ModuleFinder for JmodJavaBaseFinder {
+    fn find(&self, name: &str) -> Option<ModuleReference> {
+        (name == JAVA_BASE_MODULE).then(|| self.reference.clone())
+    }
+
+    fn find_all(&self) -> Vec<ModuleReference> {
+        vec![self.reference.clone()]
+    }
+}
+
 /// Complete module system combining static configuration and dynamic runtime state.
 ///
 /// This structure provides:
@@ -82,6 +157,9 @@ fn resolved_configuration_cell(jimage_path: &Path) -> Arc<ResolvedConfigurationC
 pub struct ModuleSystem {
     /// Static module configuration from resolution at startup.
     resolved_configuration: Arc<ResolvedConfiguration>,
+
+    /// True when this Java home uses the java.base JMOD fallback instead of a jimage.
+    jmod_fallback: bool,
 
     /// Dynamic exports: `source_module` -> (package -> set of target modules).
     /// An entry means the package is exported from `source_module` to the targets.
@@ -148,13 +226,26 @@ impl ModuleSystem {
                 })
                 .await,
             );
+            module_system.jmod_fallback =
+                Self::has_jmod_base_mapping(java_home, &module_system.resolved_configuration);
             return Ok(module_system);
         }
 
         module_system.resolved_configuration =
             Arc::new(Self::resolve_configuration(configuration, java_home, &resolver).await);
+        module_system.jmod_fallback =
+            Self::has_jmod_base_mapping(java_home, &module_system.resolved_configuration);
 
         Ok(module_system)
+    }
+
+    fn has_jmod_base_mapping(
+        java_home: &Path,
+        resolved_configuration: &ResolvedConfiguration,
+    ) -> bool {
+        !java_home.join("lib/modules").is_file()
+            && java_home.join("jmods/java.base.jmod").is_file()
+            && resolved_configuration.find_module_for_package("java/lang") == Some(JAVA_BASE_MODULE)
     }
 
     async fn resolve_configuration(
@@ -217,6 +308,7 @@ impl ModuleSystem {
     pub fn empty() -> Self {
         Self {
             resolved_configuration: Arc::new(ResolvedConfiguration::empty()),
+            jmod_fallback: false,
             exports: RwLock::new(AHashMap::default()),
             opens: RwLock::new(AHashMap::default()),
             reads: RwLock::new(AHashMap::default()),
@@ -235,6 +327,12 @@ impl ModuleSystem {
     #[must_use]
     pub fn resolved_configuration_arc(&self) -> Arc<ResolvedConfiguration> {
         Arc::clone(&self.resolved_configuration)
+    }
+
+    /// Returns whether this VM loaded its base module descriptor from a JMOD.
+    #[must_use]
+    pub(crate) fn uses_jmod_fallback(&self) -> bool {
+        self.jmod_fallback
     }
 
     /// Builds the resolver with command-line overrides and populates initial dynamic state.
@@ -330,21 +428,42 @@ impl ModuleSystem {
     async fn add_system_modules(finder_chain: &mut ModuleFinderChain, java_home: &Path) {
         let jimage_path = java_home.join("lib").join("modules");
 
-        if !jimage_path.exists() {
+        if jimage_path.exists() {
+            match SystemModuleFinder::new(&jimage_path).await {
+                Ok(system_finder) => {
+                    debug!(
+                        "Loaded {} system modules from jimage",
+                        system_finder.find_all().len()
+                    );
+                    finder_chain.add(Box::new(system_finder));
+                    return;
+                }
+                Err(error) => {
+                    debug!("Failed to load system modules from jimage: {error}");
+                    return;
+                }
+            }
+        } else {
             debug!("No jimage found at {}", jimage_path.display());
-            return;
         }
 
-        match SystemModuleFinder::new(&jimage_path).await {
-            Ok(system_finder) => {
-                debug!(
-                    "Loaded {} system modules from jimage",
-                    system_finder.find_all().len()
+        // Some small Java homes ship the boot classes as JMOD files and leave out the
+        // combined runtime image. java.base is enough to map the boot loader's packages,
+        // including resources used by ICU, without trying to resolve optional modules
+        // that may not be present in this trimmed home.
+        match JmodJavaBaseFinder::new(java_home) {
+            Ok(Some(jmod_finder)) => {
+                warn!(
+                    "Loaded only java.base from JMODs in {}; other supplied Java modules are not mapped yet",
+                    java_home.display()
                 );
-                finder_chain.add(Box::new(system_finder));
+                finder_chain.add(Box::new(jmod_finder));
+            }
+            Ok(None) => {
+                debug!("No java.base.jmod found in {}", java_home.display());
             }
             Err(error) => {
-                debug!("Failed to load system modules from jimage: {error}");
+                debug!("Failed to load java.base module descriptor from JMOD: {error}");
             }
         }
     }
@@ -1210,6 +1329,34 @@ mod tests {
     use super::*;
     use crate::ModuleRead;
     use crate::configuration::{ConfigurationBuilder, ModuleExport, ModuleOpens};
+    use std::env;
+
+    #[cfg(not(target_os = "wasi"))]
+    #[tokio::test]
+    async fn jmod_only_home_maps_icu_packages_to_java_base() {
+        let Some(java_home) = env::var_os("RUST_EDITION_JAVA25_HOME").map(PathBuf::from) else {
+            eprintln!("skipping: set RUST_EDITION_JAVA25_HOME to the prepared JMOD-only Java home");
+            return;
+        };
+        assert!(
+            !java_home.join("lib/modules").is_file(),
+            "the regression needs a JMOD-only Java home"
+        );
+        assert!(java_home.join("jmods/java.base.jmod").is_file());
+
+        let configuration = ConfigurationBuilder::new().build().unwrap();
+        let module_system = ModuleSystem::new(&configuration, &java_home, 25)
+            .await
+            .unwrap();
+
+        assert!(module_system.uses_jmod_fallback());
+        assert_eq!(
+            module_system
+                .resolved_configuration()
+                .find_module_for_package("jdk/internal/icu/impl"),
+            Some(JAVA_BASE_MODULE)
+        );
+    }
 
     #[test]
     fn test_new_module_system() {

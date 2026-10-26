@@ -3,9 +3,10 @@
 
 Ristretto 0.34 reads classes from JMOD files. It prefers lib/modules when both
 that image and jmods are present, which does not work with this adapter build.
-This script makes an ignored scratch home that contains only release and
-java.base.jmod. It copies that one JMOD from a full JDK when available, or
-extracts java.base from lib/modules and rebuilds the JMOD with the JDK tools.
+This script makes an ignored scratch home that contains release, java.base.jmod,
+and the JDK time-zone database. It copies that one JMOD from a full JDK when
+available, or extracts java.base from lib/modules and rebuilds the JMOD with the
+JDK tools.
 """
 
 from __future__ import annotations
@@ -78,15 +79,21 @@ def prepare(java_home: Path, force: bool) -> None:
 
     jmods_source = java_home / "jmods" / "java.base.jmod"
     modules_image = java_home / "lib" / "modules"
+    tzdb_source = java_home / "lib" / "tzdb.dat"
     use_existing_jmod = jmods_source.is_file()
     if not use_existing_jmod and not modules_image.is_file():
         raise RuntimeError(
             f"Java home has neither {jmods_source} nor a lib/modules image to extract"
         )
+    if not tzdb_source.is_file():
+        raise RuntimeError(f"Java home is missing its time-zone database: {tzdb_source}")
 
     staging = Path(tempfile.mkdtemp(prefix=".prepare-java25-", dir=SCRATCH_ROOT))
     try:
         shutil.copy2(java_home / "release", staging / "release")
+        output_lib = staging / "lib"
+        output_lib.mkdir()
+        shutil.copy2(tzdb_source, output_lib / "tzdb.dat")
         jmods_dir = staging / "jmods"
         jmods_dir.mkdir()
         output_jmod = jmods_dir / "java.base.jmod"
@@ -125,7 +132,7 @@ def prepare(java_home: Path, force: bool) -> None:
             shutil.rmtree(OUTPUT)
         staging.replace(OUTPUT)
         print(f"Prepared {OUTPUT} from Java {version}; {method}.")
-        print("The output contains only a release file and java.base.jmod under ignored .local/.")
+        print("The output contains release, java.base.jmod, and lib/tzdb.dat under ignored .local/.")
     finally:
         if staging.exists():
             shutil.rmtree(staging)

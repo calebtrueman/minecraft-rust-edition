@@ -3,6 +3,7 @@
 //! This module provides the `ConfigurationBuilder` struct for creating
 //! VM configurations with a fluent interface.
 
+use super::configuration::HostContext;
 use super::{
     Configuration, DEFAULT_MAX_JAVA_STACK_SIZE, JAVA_STACK_SLOT_SIZE, MainModule, ModuleExport,
     ModuleOpens, ModulePatch, ModuleRead, VerifyMode,
@@ -12,10 +13,11 @@ use crate::{IntrinsicMethod, Result};
 use ahash::{AHashMap, AHashSet};
 use ristretto_classloader::{ClassPath, DEFAULT_JAVA_VERSION};
 use ristretto_gc::GarbageCollector;
+use std::any::Any;
 use std::fmt::Debug;
 use std::io::{Read, Write, stderr, stdin, stdout};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use tokio::sync::Mutex;
 
 /// Builder for creating a `Configuration` with a fluent interface.
@@ -43,6 +45,7 @@ pub struct ConfigurationBuilder {
     java_home: Option<PathBuf>,
     java_version: Option<String>,
     native_methods: AHashMap<String, IntrinsicMethod>,
+    host_context: Option<HostContext>,
     system_properties: AHashMap<String, String>,
     interpreted: bool,
     batch_compilation: bool,
@@ -92,6 +95,7 @@ impl ConfigurationBuilder {
             java_home: None,
             java_version: None,
             native_methods: AHashMap::default(),
+            host_context: None,
             system_properties: AHashMap::default(),
             interpreted: false,
             batch_compilation: true,
@@ -164,6 +168,16 @@ impl ConfigurationBuilder {
     ) -> Self {
         self.native_methods
             .insert(signature.as_ref().to_string(), method);
+        self
+    }
+
+    /// Set caller-owned state for this VM's native methods.
+    ///
+    /// A native method can reach this context through `Thread::vm().host_context()`. The VM
+    /// keeps it alive until the VM is dropped; it is never stored in a process-wide registry.
+    #[must_use]
+    pub fn host_context(mut self, context: Arc<dyn Any + Send + Sync>) -> Self {
+        self.host_context = Some(Arc::new(RwLock::new(Some(context))));
         self
     }
 
@@ -412,6 +426,7 @@ impl ConfigurationBuilder {
             java_home,
             java_version,
             native_methods: self.native_methods,
+            host_context: self.host_context,
             system_properties: {
                 #[cfg_attr(not(target_family = "wasm"), expect(unused_mut))]
                 let mut system_properties = self.system_properties;
@@ -458,6 +473,7 @@ impl Debug for ConfigurationBuilder {
             .field("java_home", &self.java_home)
             .field("java_version", &self.java_version)
             .field("native_methods", &self.native_methods)
+            .field("has_host_context", &self.host_context.is_some())
             .field("system_properties", &self.system_properties)
             .field("interpreted", &self.interpreted)
             .field("batch_compilation", &self.batch_compilation)

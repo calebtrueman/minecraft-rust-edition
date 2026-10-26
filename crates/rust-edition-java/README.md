@@ -13,7 +13,10 @@ This proves that Java class code can call a Rust function through Ristretto. It 
 Fabric mod, launch a Java process, load Fabric, connect to Minecraft: Rust Edition, or provide a
 Minecraft or Fabric API. The `javac` test source and class files live only in a temporary folder.
 
-Ristretto's source, license, and upstream credit are in `third_party/ristretto_vm`.
+Ristretto's source and license are kept in `third_party/ristretto_vm` and
+`third_party/ristretto_classloader`. The local classloader copy fixes file URLs for paths with
+spaces and reserved URL characters. Its upstream version and change are recorded in
+`third_party/ristretto_classloader/UPSTREAM.md`.
 
 Prepare the small library home from an installed Java 25 JDK, then run the focused integration
 check. The helper uses `java.base.jmod` when the JDK has it; otherwise it extracts `java.base` from
@@ -29,10 +32,10 @@ cargo test --release --manifest-path crates/rust-edition-java/Cargo.toml
 ```
 
 The test skips its Java fixture only when both environment variables are unset. If either is set
-but missing or broken, the test fails. The prepared home contains only `release` and
-`jmods/java.base.jmod`; it is enough for this fixture, not a full Java library for Fabric mods.
-Use `--force` to rebuild the generated folder. No Java library files or class files belong in the
-repository.
+but missing or broken, the test fails. The prepared home contains `release`,
+`jmods/java.base.jmod`, and `lib/tzdb.dat`. That time-zone file lets Fabric write timestamped logs.
+The rest of the home is still too small for full Fabric mod loading. Use `--force` to rebuild the
+generated folder. No Java library files or class files belong in the repository.
 
 Ristretto 0.34 prefers a JDK's `lib/modules` image when it is present alongside `jmods`. In this
 adapter setup that path fails to load `java.lang.ThreadGroup`, so the test uses the stripped scratch

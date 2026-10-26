@@ -1,0 +1,741 @@
+#[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
+use crate::Error;
+use crate::runtime::util;
+use crate::{Class, ClassLoader, ClassLoaderType, ClassPath, Result};
+#[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
+use flate2::bufread::GzDecoder;
+use ristretto_classfile::Error::IoError;
+use ristretto_classfile::{ClassAccessFlags, ClassFile, ConstantPool, JAVA_1_0_2};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Weak};
+#[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
+use std::{env, io};
+#[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
+use tar::Archive;
+#[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
+use tracing::{debug, warn};
+
+/// The default Java version used by the class loader. This is the version that will be used if no
+/// version is specified when creating a class loader.
+pub const DEFAULT_JAVA_VERSION: &str = JAVA_25_VERSION;
+
+/// Java 8 LTS version
+pub const JAVA_8_VERSION: &str = "8.504.01.1";
+
+/// Java 11 LTS version
+pub const JAVA_11_VERSION: &str = "11.0.32.12.1";
+
+/// Java 17 LTS version
+pub const JAVA_17_VERSION: &str = "17.0.20.12.1";
+
+/// Java 21 LTS version
+pub const JAVA_21_VERSION: &str = "21.0.12.12.1";
+
+/// Java 25 LTS version (also the default)
+pub const JAVA_25_VERSION: &str = "25.0.4.10.1";
+
+/// Array of all supported Java LTS versions for iteration in tests
+pub const ALL_LTS_VERSIONS: &[&str] = &[
+    JAVA_8_VERSION,
+    JAVA_11_VERSION,
+    JAVA_17_VERSION,
+    JAVA_21_VERSION,
+    JAVA_25_VERSION,
+];
+
+/// The access flags for primitive classes in the Java runtime. These classes are public, final, and
+/// abstract, meaning they cannot be instantiated and do not have any methods or fields.
+const PRIMITIVE_CLASS_ACCESS_FLAGS: ClassAccessFlags = ClassAccessFlags::from_bits_retain(
+    ClassAccessFlags::PUBLIC.bits()
+        | ClassAccessFlags::FINAL.bits()
+        | ClassAccessFlags::ABSTRACT.bits(),
+);
+
+/// Get a class loader for the default Java runtime version. If the version is not installed, the
+/// archive will be downloaded and extracted.
+///
+/// # Errors
+///
+/// An error will be returned if the class loader cannot be created.
+#[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
+pub async fn default_class_loader() -> Result<(PathBuf, String, Arc<ClassLoader>)> {
+    version_class_loader(DEFAULT_JAVA_VERSION).await
+}
+
+/// `wasm32-unknown-unknown` cannot perform I/O. The JDK home must be supplied via
+/// `RISTRETTO_JDK_<MAJOR>_HOME`, `RISTRETTO_JDKS_DIR`, or `RISTRETTO_JDK_HOME`.
+///
+/// # Errors
+///
+/// Returns an error if no environment variable resolves to a valid JDK home.
+#[cfg(all(target_family = "wasm", target_os = "unknown"))]
+pub async fn default_class_loader() -> Result<(PathBuf, String, Arc<ClassLoader>)> {
+    version_class_loader(DEFAULT_JAVA_VERSION).await
+}
+
+/// `wasm32-unknown-unknown` implementation of `version_class_loader`. Networking and on-demand JDK
+/// downloads are not available, so the JDK must be supplied via one of the following environment
+/// variables (checked in order):
+///
+/// 1. `RISTRETTO_JDK_<MAJOR>_HOME` — points directly at the JDK home for the requested major
+///    version (e.g. `RISTRETTO_JDK_25_HOME=/jdks/25`).
+/// 2. `RISTRETTO_JDKS_DIR` — points at a directory containing one entry per full version string
+///    (e.g. `<dir>/25.0.4.10.1`).
+/// 3. `RISTRETTO_JDK_HOME` — generic fallback pointing at any JDK.
+///
+/// # Errors
+///
+/// Returns an error if none of the environment variables resolve to a valid JDK home or the JDK
+/// cannot be loaded.
+#[cfg(all(target_family = "wasm", target_os = "unknown"))]
+pub async fn version_class_loader(version: &str) -> Result<(PathBuf, String, Arc<ClassLoader>)> {
+    let major = version.split('.').next().unwrap_or(version);
+    let env_key = format!("RISTRETTO_JDK_{major}_HOME");
+    if let Ok(path) = std::env::var(&env_key) {
+        return home_class_loader(Path::new(&path)).await;
+    }
+    if let Ok(dir) = std::env::var("RISTRETTO_JDKS_DIR") {
+        let path = Path::new(&dir).join(version);
+        return home_class_loader(&path).await;
+    }
+    if let Ok(path) = std::env::var("RISTRETTO_JDK_HOME") {
+        return home_class_loader(Path::new(&path)).await;
+    }
+    Err(IoError(format!(
+        "JDK not found for version {version}; set {env_key}, RISTRETTO_JDKS_DIR, or RISTRETTO_JDK_HOME"
+    ))
+    .into())
+}
+
+/// Get a class loader for the given Java home.
+///
+/// # Errors
+///
+/// An error will be returned if the class loader cannot be created.
+pub async fn home_class_loader(java_home: &Path) -> Result<(PathBuf, String, Arc<ClassLoader>)> {
+    let version_file = java_home.join("version.txt");
+    // Corretto version 8 does not have a release file, but includes a version.txt file. Since most
+    // versions of Corretto include a version.txt file, and it should be faster to process, we can
+    // use this file to determine the version.  The version.txt file also includes the full version
+    // number (e.g. 21.0.5.11.1) instead of a partial version in the release file JAVA_VERSION
+    // property (e.g. 21.0.5).
+    let java_version = if version_file.exists() {
+        let version_file = java_home.join("version.txt");
+        #[cfg(target_family = "wasm")]
+        let java_version = std::fs::read_to_string(version_file)?;
+        #[cfg(not(target_family = "wasm"))]
+        let java_version = tokio::fs::read_to_string(version_file).await?;
+        java_version.trim().to_string()
+    } else {
+        let release_file = java_home.join("release");
+
+        #[cfg(target_family = "wasm")]
+        let release = std::fs::read_to_string(release_file)?;
+        #[cfg(not(target_family = "wasm"))]
+        let release = tokio::fs::read_to_string(release_file).await?;
+
+        let Some(java_version_line) = release
+            .lines()
+            .find(|line| line.starts_with("JAVA_VERSION"))
+        else {
+            return Err(IoError("JAVA_VERSION not found in release file".to_string()).into());
+        };
+        java_version_line
+            .split('=')
+            .next_back()
+            .unwrap_or_default()
+            .replace('"', "")
+    };
+
+    let class_path = get_class_path(&java_version, java_home)?;
+    let class_loader = ClassLoader::new_builtin(ClassLoaderType::Bootstrap, class_path);
+    register_primitives(&class_loader).await?;
+    Ok((java_home.to_path_buf(), java_version, class_loader))
+}
+
+/// Prepend entries to a bootstrap class loader's class path.
+///
+/// The returned class loader retains the original runtime class path after the additional entries.
+/// Primitive classes are registered on the replacement loader just as they are for a newly created
+/// runtime class loader.
+///
+/// # Errors
+///
+/// if primitive classes cannot be registered on the replacement class loader.
+pub async fn prepend_bootstrap_class_path(
+    class_loader: &Arc<ClassLoader>,
+    additional_class_path: &ClassPath,
+) -> Result<Arc<ClassLoader>> {
+    let mut entries = additional_class_path.iter().cloned().collect::<Vec<_>>();
+    if entries.is_empty() {
+        return Ok(Arc::clone(class_loader));
+    }
+    entries.extend(class_loader.class_path().iter().cloned());
+
+    let class_loader =
+        ClassLoader::new_builtin(ClassLoaderType::Bootstrap, ClassPath::new(entries));
+    register_primitives(&class_loader).await?;
+    Ok(class_loader)
+}
+
+/// Get a class loader for the given Java runtime version. If the version is not installed, the
+/// archive will be downloaded and extracted. A version can be a partial version, a major version,
+/// or a `*` to get the latest LTS release supported by the runtime.
+///
+/// # Errors
+///
+/// An error will be returned if the class loader cannot be created.
+#[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
+pub async fn version_class_loader(version: &str) -> Result<(PathBuf, String, Arc<ClassLoader>)> {
+    let (os, arch) = util::host_os_arch();
+    version_class_loader_for_os(version, os, arch).await
+}
+
+/// Resolve the home directory used to cache JDK downloads. On native targets this is the user's
+/// home directory (`$HOME` on Unix, `%USERPROFILE%` on Windows). On wasi we fall back to the
+/// current directory because wasi does not expose a real home directory.
+#[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
+fn cache_home_dir() -> PathBuf {
+    if let Ok(value) = env::var("HOME")
+        && !value.is_empty()
+    {
+        return PathBuf::from(value);
+    }
+    if let Some(home) = dirs::home_dir() {
+        return home;
+    }
+    env::current_dir().unwrap_or_default()
+}
+
+/// Get a class loader for the given Java runtime version, targeting the specified OS and
+/// architecture. The archive is downloaded (if not already cached) and extracted under
+/// `~/.ristretto/<os>-<arch>/<version>` so distributions for different platforms
+/// do not collide with each other or with the host install.
+///
+/// `os` accepts `"macos"`, `"linux"`, `"alpine-linux"`, or `"windows"`. `arch` accepts `"x64"`,
+/// `"x86"`, or `"aarch64"`. This is intended for tests / tooling that need to inspect the JDK
+/// class library shipped for a non-host OS (for example, to verify intrinsic method coverage on
+/// every supported platform).
+///
+/// # Errors
+///
+/// An error will be returned if the class loader cannot be created.
+#[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
+pub async fn version_class_loader_for_os(
+    version: &str,
+    os: &str,
+    arch: &str,
+) -> Result<(PathBuf, String, Arc<ClassLoader>)> {
+    if let Some(result) = try_env_class_loader(version).await? {
+        return Ok(result);
+    }
+
+    let mut version = version.to_string();
+    let home_dir = cache_home_dir();
+
+    let base_path = home_dir.join(".ristretto").join(format!("{os}-{arch}"));
+    let mut installation_dir = base_path.join(&version);
+    if !is_complete_installation(&version, os, &installation_dir)? {
+        remove_incomplete_installation(&installation_dir).await?;
+        let (extracted_version, file_name, archive) =
+            util::get_runtime_archive_for(&version, os, arch).await?;
+        installation_dir = extract_archive(&version, &file_name, &archive, &base_path).await?;
+        version = extracted_version;
+    }
+
+    let installation_dir = java_home_for_os(os, installation_dir);
+    let class_path = get_class_path(&version, &installation_dir)?;
+    let class_loader = ClassLoader::new_builtin(ClassLoaderType::Bootstrap, class_path);
+    register_primitives(&class_loader).await?;
+    Ok((installation_dir, version, class_loader))
+}
+
+#[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
+fn java_home_for_os(os: &str, installation_dir: PathBuf) -> PathBuf {
+    if os == "macos" {
+        installation_dir.join("Contents").join("Home")
+    } else {
+        installation_dir
+    }
+}
+
+#[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
+fn is_complete_installation(version: &str, os: &str, installation_dir: &Path) -> Result<bool> {
+    if !installation_dir.exists() {
+        return Ok(false);
+    }
+
+    let java_home = java_home_for_os(os, installation_dir.to_path_buf());
+    if util::parse_major_version(version) <= 8 {
+        return Ok(java_home.join("jre").join("lib").join("rt.jar").is_file());
+    }
+
+    if java_home.join("lib").join("modules").is_file() {
+        return Ok(true);
+    }
+
+    let jmods_path = java_home.join("jmods");
+    if !jmods_path.is_dir() {
+        return Ok(false);
+    }
+
+    for entry in std::fs::read_dir(jmods_path)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path
+            .extension()
+            .is_some_and(|extension| extension == "jmod")
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+#[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
+#[cfg_attr(target_family = "wasm", expect(clippy::unused_async))]
+async fn remove_incomplete_installation(installation_dir: &Path) -> Result<()> {
+    if !installation_dir.exists() {
+        return Ok(());
+    }
+
+    #[cfg(target_family = "wasm")]
+    std::fs::remove_dir_all(installation_dir)?;
+    #[cfg(not(target_family = "wasm"))]
+    tokio::fs::remove_dir_all(installation_dir).await?;
+    Ok(())
+}
+
+/// If `RISTRETTO_JDK_<MAJOR>_HOME`, `RISTRETTO_JDKS_DIR`, or `RISTRETTO_JDK_HOME` is set, use it
+/// instead of downloading a JDK. This lets users (and CI) point at a pre-installed runtime to
+/// avoid network access.
+#[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
+async fn try_env_class_loader(
+    version: &str,
+) -> Result<Option<(PathBuf, String, Arc<ClassLoader>)>> {
+    let major = version.split('.').next().unwrap_or(version);
+    let env_key = format!("RISTRETTO_JDK_{major}_HOME");
+    if let Ok(path) = env::var(&env_key)
+        && !path.is_empty()
+    {
+        return home_class_loader(Path::new(&path)).await.map(Some);
+    }
+    if let Ok(dir) = env::var("RISTRETTO_JDKS_DIR")
+        && !dir.is_empty()
+    {
+        let path = Path::new(&dir).join(version);
+        if path.exists() {
+            return home_class_loader(&path).await.map(Some);
+        }
+    }
+    if let Ok(path) = env::var("RISTRETTO_JDK_HOME")
+        && !path.is_empty()
+    {
+        return home_class_loader(Path::new(&path)).await.map(Some);
+    }
+    Ok(None)
+}
+
+/// Register all primitive classes in the class loader.
+async fn register_primitives(class_loader: &Arc<ClassLoader>) -> Result<()> {
+    let class_loader_weak_ref = Arc::downgrade(class_loader);
+    let classes = [
+        create_primitive_class(&class_loader_weak_ref, "boolean")?,
+        create_primitive_class(&class_loader_weak_ref, "byte")?,
+        create_primitive_class(&class_loader_weak_ref, "char")?,
+        create_primitive_class(&class_loader_weak_ref, "double")?,
+        create_primitive_class(&class_loader_weak_ref, "float")?,
+        create_primitive_class(&class_loader_weak_ref, "int")?,
+        create_primitive_class(&class_loader_weak_ref, "long")?,
+        create_primitive_class(&class_loader_weak_ref, "short")?,
+        create_primitive_class(&class_loader_weak_ref, "void")?,
+    ];
+    class_loader.register_all(classes).await?;
+    Ok(())
+}
+
+/// Creates a primitive class in the class loader.
+fn create_primitive_class(class_loader: &Weak<ClassLoader>, primitive: &str) -> Result<Arc<Class>> {
+    let mut constant_pool = ConstantPool::new();
+    let this_class_index = constant_pool.add_class(primitive)?;
+    let class_file = ClassFile {
+        version: JAVA_1_0_2,
+        constant_pool,
+        access_flags: PRIMITIVE_CLASS_ACCESS_FLAGS,
+        this_class: this_class_index,
+        ..Default::default()
+    };
+    let class = Class::from(Some(class_loader.clone()), class_file)?;
+    Ok(class)
+}
+
+/// Get the class path for the given version.
+///
+/// # Errors
+///
+/// An error will be returned if the class path cannot be determined.
+fn get_class_path(version: &str, installation_dir: &Path) -> Result<ClassPath> {
+    let class_path = if util::parse_major_version(version) <= 8 {
+        let library_path = installation_dir.join("jre").join("lib");
+        let mut class_path = Vec::with_capacity(2);
+        let resources_jar_path = library_path.join("resources.jar");
+        if resources_jar_path.is_file() {
+            class_path.push(resources_jar_path);
+        }
+        class_path.push(library_path.join("rt.jar"));
+        class_path
+    } else {
+        let modules_path = installation_dir.join("lib").join("modules");
+        if modules_path.exists() {
+            vec![modules_path]
+        } else {
+            let jmods_path = installation_dir.join("jmods");
+            let jmod_files = std::fs::read_dir(jmods_path)?
+                .filter_map(|entry| {
+                    let entry = entry.ok()?;
+                    let path = entry.path();
+                    if path.extension()?.to_string_lossy() == "jmod" {
+                        Some(path)
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>();
+            let mut class_paths = jmod_files.into_iter().collect::<Vec<_>>();
+            class_paths.sort_by(Ord::cmp);
+            class_paths
+        }
+    };
+    Ok(ClassPath::from(&class_path))
+}
+
+/// Extract the archive to the installation directory.
+///
+/// # Errors
+///
+/// An error will be returned if the archive cannot be extracted.
+#[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
+#[cfg_attr(target_family = "wasm", expect(clippy::unused_async))]
+#[expect(clippy::too_many_lines)]
+async fn extract_archive(
+    version: &str,
+    file_name: &str,
+    archive: &Vec<u8>,
+    out_dir: &PathBuf,
+) -> Result<PathBuf> {
+    #[cfg(target_family = "wasm")]
+    std::fs::create_dir_all(out_dir)?;
+    #[cfg(not(target_family = "wasm"))]
+    tokio::fs::create_dir_all(out_dir).await?;
+
+    let Some(extension) = file_name.split('.').next_back() else {
+        return Err(Error::ArchiveError(
+            "No extension found in file name".to_string(),
+        ));
+    };
+
+    let archive = io::Cursor::new(archive);
+    let extract_dir = tempfile::tempdir_in(out_dir)?.keep();
+    debug!(
+        "Extracting {file_name} to {}",
+        extract_dir.to_string_lossy()
+    );
+
+    if extension == "zip" {
+        let mut zip = zip::ZipArchive::new(archive)?;
+        zip.extract(&extract_dir)?;
+    } else {
+        let decoder = GzDecoder::new(archive);
+        let mut tar = Archive::new(decoder);
+        #[cfg(windows)]
+        {
+            // Iterate entries manually so symlinks (which require admin / Developer
+            // Mode privilege on Windows) can be skipped without aborting extraction.
+            for entry in tar.entries()? {
+                let mut entry = entry?;
+                let header_kind = entry.header().entry_type();
+                if header_kind.is_symlink() || header_kind.is_hard_link() {
+                    continue;
+                }
+                if let Err(error) = entry.unpack_in(&extract_dir)
+                    && error.raw_os_error() != Some(1314)
+                {
+                    return Err(error.into());
+                }
+            }
+        }
+        #[cfg(all(not(windows), not(target_family = "wasm")))]
+        {
+            tar.unpack(extract_dir.clone())?;
+        }
+        #[cfg(target_family = "wasm")]
+        {
+            use std::io::Read;
+            for entry in tar.entries()? {
+                let mut entry = entry?;
+                let path = extract_dir.join(entry.path()?);
+                let kind = entry.header().entry_type();
+                if kind.is_dir() {
+                    std::fs::create_dir_all(&path)?;
+                } else if kind.is_file() {
+                    if let Some(parent) = path.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    let mut buf = Vec::new();
+                    entry.read_to_end(&mut buf)?;
+                    std::fs::write(&path, buf)?;
+                }
+            }
+        }
+    }
+
+    #[cfg(target_family = "wasm")]
+    let runtime_dir = {
+        let mut entries = std::fs::read_dir(&extract_dir)?;
+        let Some(runtime_dir) = entries.next() else {
+            return Err(Error::ArchiveError(
+                "No directory found in archive".to_string(),
+            ));
+        };
+        runtime_dir?
+    };
+    #[cfg(not(target_family = "wasm"))]
+    let runtime_dir = {
+        let mut entries = tokio::fs::read_dir(&extract_dir).await?;
+        let Some(runtime_dir) = entries.next_entry().await? else {
+            return Err(Error::ArchiveError(
+                "No directory found in archive".to_string(),
+            ));
+        };
+        runtime_dir
+    };
+
+    let runtime_dir = runtime_dir.path();
+    let installation_dir = out_dir.join(version);
+
+    // Rename the runtime directory to the installation directory. Another process may have
+    // already installed the runtime, so we need to check if the installation directory exists.
+    // If it does, we can ignore the error.
+    #[cfg(target_family = "wasm")]
+    let rename_result = std::fs::rename(runtime_dir.clone(), installation_dir.clone());
+    #[cfg(not(target_family = "wasm"))]
+    let rename_result = tokio::fs::rename(runtime_dir.clone(), installation_dir.clone()).await;
+
+    if let Err(error) = rename_result {
+        warn!(
+            "Failed to rename {} to {}",
+            runtime_dir.to_string_lossy(),
+            installation_dir.to_string_lossy(),
+        );
+        if !installation_dir.exists() {
+            return Err(Error::ArchiveError(error.to_string()));
+        }
+    }
+
+    #[cfg(target_family = "wasm")]
+    std::fs::remove_dir_all(&extract_dir)?;
+    #[cfg(not(target_family = "wasm"))]
+    tokio::fs::remove_dir_all(&extract_dir).await?;
+
+    debug!(
+        "Installed {version} to: {}",
+        installation_dir.to_string_lossy()
+    );
+
+    Ok(installation_dir)
+}
+
+#[cfg(all(test, not(all(target_family = "wasm", target_os = "unknown"))))]
+mod tests {
+    use super::*;
+    use ristretto_classfile::JavaStr;
+    use tempfile::TempDir;
+
+    /// Load a class using the default class loader.
+    async fn load_class(class_name: &str) -> Result<Arc<Class>> {
+        let (_path, _version, class_loader) = default_class_loader().await?;
+        let class_name = JavaStr::try_from_str(class_name)?;
+        let (class, _loaded_previously) = class_loader.load_with_status(class_name).await?;
+        Ok(class)
+    }
+
+    #[tokio::test]
+    async fn test_class_loader_v8() -> Result<()> {
+        let version = JAVA_8_VERSION;
+        let (_java_home, java_version, class_loader) = version_class_loader(version).await?;
+        assert_eq!(version, java_version);
+        assert_eq!("bootstrap", class_loader.name());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_class_loader_v21() -> Result<()> {
+        let version = JAVA_21_VERSION;
+        let (_java_home, java_version, class_loader) = version_class_loader(version).await?;
+        assert_eq!(version, java_version);
+        assert_eq!("bootstrap", class_loader.name());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_prepend_bootstrap_class_path() -> Result<()> {
+        let class_path = ClassPath::from(&["runtime"]);
+        let class_loader = ClassLoader::new_builtin(ClassLoaderType::Bootstrap, class_path);
+        let additional_class_path = ClassPath::from(&["tools.jar"]);
+
+        let class_loader =
+            prepend_bootstrap_class_path(&class_loader, &additional_class_path).await?;
+
+        assert_eq!(Some(ClassLoaderType::Bootstrap), class_loader.loader_type());
+        let entries = class_loader
+            .class_path()
+            .iter()
+            .map(|entry| entry.name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(["tools.jar", "runtime"], entries.as_slice());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_load_primitive_classes() -> Result<()> {
+        let class_names = [
+            "boolean", "byte", "char", "double", "float", "int", "long", "short", "void",
+        ];
+        for class_name in class_names {
+            let class = load_class(class_name).await?;
+            assert_eq!(class.name(), class_name);
+            assert!(class.is_primitive());
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_load_primitive_array_classes() -> Result<()> {
+        let class_names = ["[Z", "[B", "[C", "[D", "[F", "[I", "[J", "[S"];
+        for class_name in class_names {
+            let class = load_class(class_name).await?;
+            assert_eq!(class.name(), class_name);
+            assert!(class.is_array());
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_load_object_class() -> Result<()> {
+        let class_name = "java.lang.Object";
+        let class = load_class(class_name).await?;
+        assert_eq!(class.name(), "java/lang/Object");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_load_object_array_class() -> Result<()> {
+        let class_name = "[Ljava.lang.Object;";
+        let class = load_class(class_name).await?;
+        assert_eq!(class.name(), "[Ljava/lang/Object;");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_load_object_multi_array_class() -> Result<()> {
+        let class_name = "[[Ljava.lang.Object;";
+        let class = load_class(class_name).await?;
+        assert_eq!(class.name(), "[[Ljava/lang/Object;");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_load_big_integer_class() -> Result<()> {
+        let class_name = "java.math.BigInteger";
+        let class = load_class(class_name).await?;
+        assert_eq!(class.name(), "java/math/BigInteger");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_load_big_integer_array_class() -> Result<()> {
+        let class_name = "[Ljava.math.BigInteger;";
+        let class = load_class(class_name).await?;
+        assert_eq!(class.name(), "[Ljava/math/BigInteger;");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_load_big_integer_multi_array_class() -> Result<()> {
+        let class_name = "[[Ljava.math.BigInteger;";
+        let class = load_class(class_name).await?;
+        assert_eq!(class.name(), "[[Ljava/math/BigInteger;");
+        Ok(())
+    }
+
+    #[test]
+    fn test_java_home_for_os() {
+        let installation_dir = PathBuf::from("runtime");
+        assert_eq!(
+            installation_dir.join("Contents").join("Home"),
+            java_home_for_os("macos", installation_dir.clone())
+        );
+        assert_eq!(
+            installation_dir,
+            java_home_for_os("linux", PathBuf::from("runtime"))
+        );
+    }
+
+    #[test]
+    fn test_java_8_class_path_includes_resources() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let library_path = temp_dir.path().join("jre").join("lib");
+        std::fs::create_dir_all(&library_path)?;
+        let rt_jar_path = library_path.join("rt.jar");
+        let resources_jar_path = library_path.join("resources.jar");
+        std::fs::write(&rt_jar_path, [])?;
+        std::fs::write(&resources_jar_path, [])?;
+
+        let class_path = get_class_path("8u402", temp_dir.path())?;
+        let entries = class_path
+            .iter()
+            .map(|entry| PathBuf::from(entry.name()))
+            .collect::<Vec<_>>();
+        assert_eq!(vec![resources_jar_path, rt_jar_path], entries);
+        Ok(())
+    }
+
+    #[test]
+    fn test_is_complete_installation() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let missing = temp_dir.path().join("missing");
+        assert!(!is_complete_installation("17.0.1", "linux", &missing)?);
+
+        let java8 = temp_dir.path().join("java8");
+        std::fs::create_dir_all(java8.join("jre").join("lib"))?;
+        std::fs::write(java8.join("jre").join("lib").join("rt.jar"), [])?;
+        assert!(is_complete_installation("8u402", "linux", &java8)?);
+
+        let modules = temp_dir.path().join("modules");
+        std::fs::create_dir_all(modules.join("lib"))?;
+        std::fs::write(modules.join("lib").join("modules"), [])?;
+        assert!(is_complete_installation("17.0.1", "linux", &modules)?);
+
+        let jmods = temp_dir.path().join("jmods");
+        assert!(!is_complete_installation("17.0.1", "linux", &jmods)?);
+        std::fs::create_dir_all(jmods.join("jmods"))?;
+        std::fs::write(jmods.join("jmods").join("README.txt"), [])?;
+        assert!(!is_complete_installation("17.0.1", "linux", &jmods)?);
+        std::fs::write(jmods.join("jmods").join("java.base.jmod"), [])?;
+        assert!(is_complete_installation("17.0.1", "linux", &jmods)?);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_remove_incomplete_installation() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let installation_dir = temp_dir.path().join("runtime");
+        remove_incomplete_installation(&installation_dir).await?;
+
+        std::fs::create_dir_all(&installation_dir)?;
+        std::fs::write(installation_dir.join("partial"), [])?;
+        remove_incomplete_installation(&installation_dir).await?;
+        assert!(!installation_dir.exists());
+        Ok(())
+    }
+}

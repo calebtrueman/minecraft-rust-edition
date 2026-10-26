@@ -56,9 +56,21 @@ impl MethodRegistry {
         let registry = registry
             .as_ref()
             .map_err(|error| crate::Error::InternalError(error.to_string()))?;
+        let mut overrides = AHashMap::default();
+        overrides.insert(
+            "jdk/internal/reflect/Reflection.getCallerClass()Ljava/lang/Class;".to_string(),
+            IntrinsicMethod::Async(super::jmod_reflection::get_caller_class),
+        );
+        #[cfg(target_family = "unix")]
+        if version.major() >= 65 {
+            overrides.insert(
+                "sun/nio/fs/UnixNativeDispatcher.access0(JI)I".to_string(),
+                IntrinsicMethod::Sync(super::unix_access::access_0_1),
+            );
+        }
         Ok(Self {
             registry,
-            overrides: AHashMap::default(),
+            overrides,
         })
     }
 
@@ -68,7 +80,7 @@ impl MethodRegistry {
         overrides: AHashMap<String, IntrinsicMethod>,
     ) -> Result<Self> {
         let mut registry = Self::new(version)?;
-        registry.overrides = overrides;
+        registry.overrides.extend(overrides);
         Ok(registry)
     }
 
@@ -230,6 +242,24 @@ mod tests {
         let result = method_registry.method("foo", "hashCode", "()I");
         assert!(result.is_none());
         Ok(())
+    }
+
+    #[cfg(target_family = "unix")]
+    #[test]
+    fn test_access_override_matches_java_21_signature() {
+        let java_17 = MethodRegistry::new(&JAVA_17).expect("valid Java 17 registry");
+        assert!(
+            java_17
+                .method("sun/nio/fs/UnixNativeDispatcher", "access0", "(JI)I")
+                .is_none()
+        );
+
+        let java_21 = MethodRegistry::new(&JAVA_21).expect("valid Java 21 registry");
+        assert!(
+            java_21
+                .method("sun/nio/fs/UnixNativeDispatcher", "access0", "(JI)I")
+                .is_some()
+        );
     }
 
     #[cfg(target_family = "unix")]

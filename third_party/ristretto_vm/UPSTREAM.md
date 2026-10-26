@@ -26,6 +26,25 @@ the cached virtual and interface call paths. See the changes in `src/configurati
 This adds a way for Rust code to answer selected Java native calls. It does not add JNI library
 loading, Fabric support, Minecraft classes, or bindings from Java mods to the Rust game and renderer.
 
+This copy also reads the `java.base` descriptor from `jmods/java.base.jmod` when a small Java home
+has no `lib/modules` image. The descriptor gives the VM the package map it needs to load internal
+base-module resources. In that case, a VM-side `Reflection.getCallerClass` wrapper keeps the normal
+Ristretto code for Java homes with an image and skips the Java system-module lookup only when the
+JMOD package map is present. The fallback currently maps `java.base` only; the VM logs that other
+JMOD modules are not mapped yet.
+
+On Unix hosts, the VM also wraps Java 21 and newer `UnixNativeDispatcher.access0(JI)I`. In this
+version, the upstream Ristretto intrinsic returns libc's raw `-1` when a path is missing, but
+Java expects the OS error number. The wrapper keeps the upstream path and permission checks and
+changes only that `-1` result to the saved OS error. This lets Java report a missing parent
+correctly while it builds nested directories. Registered application callbacks still take
+precedence over this wrapper.
+
+The local patch also adds optional caller-owned state to VM configuration. Native callbacks
+can read it through their thread's VM. The adapter clears this state when it is dropped;
+a callback that already holds its own `Arc` can finish safely. This does not stop Ristretto's
+Java threads or promise that the VM itself has shut down.
+
 ## Included compiled helper files
 
 These four upstream Java 8 compiler bridge helpers are embedded by `src/compiler/bridge.rs`; the

@@ -9,11 +9,15 @@ use ahash::{AHashMap, AHashSet};
 pub use ristretto_classfile::VerifyMode;
 use ristretto_classloader::{ClassPath, ClassPathEntry};
 use ristretto_gc::GarbageCollector;
+use std::any::Any;
 use std::fmt::Debug;
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use tokio::sync::Mutex;
+
+/// Shared caller state that can be released when its owning adapter is dropped.
+pub(super) type HostContext = Arc<RwLock<Option<Arc<dyn Any + Send + Sync>>>>;
 
 /// Configuration for the Ristretto Virtual Machine (VM).
 ///
@@ -30,6 +34,8 @@ pub struct Configuration {
     pub(super) java_home: Option<PathBuf>,
     pub(super) java_version: Option<String>,
     pub(super) native_methods: AHashMap<String, IntrinsicMethod>,
+    /// Caller-owned state made available to native methods through their VM thread.
+    pub(super) host_context: Option<HostContext>,
     pub(super) system_properties: AHashMap<String, String>,
     pub(super) interpreted: bool,
     pub(super) batch_compilation: bool,
@@ -55,6 +61,37 @@ pub struct Configuration {
 }
 
 impl Configuration {
+    /// Returns the caller-owned context available to native methods.
+    #[must_use]
+    pub fn host_context(&self) -> Option<Arc<dyn Any + Send + Sync>> {
+        let host_context = self.host_context.as_ref()?;
+        let host_context = host_context
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        host_context.clone()
+    }
+
+    pub(crate) fn clear_host_context(&self) {
+        if let Some(host_context) = self.host_context.as_ref() {
+            let previous = {
+                let mut host_context = host_context
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                host_context.take()
+            };
+            // A caller's destructor may do more work, including asking the VM for its
+            // context. Release the lock before running that destructor.
+            drop(previous);
+        }
+    }
+
+    fn has_host_context(&self) -> bool {
+        self.host_context
+            .as_ref()
+            .and_then(|host_context| host_context.read().ok().map(|context| context.is_some()))
+            .unwrap_or(false)
+    }
+
     pub(crate) fn native_methods(&self) -> &AHashMap<String, IntrinsicMethod> {
         &self.native_methods
     }
@@ -283,6 +320,7 @@ impl Debug for Configuration {
             .field("jar", &self.jar)
             .field("java_home", &self.java_home)
             .field("java_version", &self.java_version)
+            .field("has_host_context", &self.has_host_context())
             .field("system_properties", &self.system_properties)
             .field("interpreted", &self.interpreted)
             .field("batch_compilation", &self.batch_compilation)

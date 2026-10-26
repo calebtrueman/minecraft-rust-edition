@@ -378,6 +378,23 @@ impl VM {
         &self.configuration
     }
 
+    /// Returns caller-owned state registered for this VM's native methods.
+    ///
+    /// The context is owned by this VM and can be reached from a native method using
+    /// `Thread::vm()`. The returned `Arc` keeps it alive while a callback uses it. It is not
+    /// shared with other VMs unless the caller gives them the same `Arc`.
+    #[must_use]
+    pub fn host_context(&self) -> Option<Arc<dyn std::any::Any + Send + Sync>> {
+        self.configuration.host_context()
+    }
+
+    /// Clear caller-owned state registered for this VM's native methods.
+    ///
+    /// Existing callback clones remain valid until those callbacks finish.
+    pub fn clear_host_context(&self) {
+        self.configuration.clear_host_context();
+    }
+
     /// Get the module system for runtime module state management.
     #[must_use]
     pub(crate) fn module_system(&self) -> &ModuleSystem {

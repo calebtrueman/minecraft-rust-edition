@@ -4,13 +4,23 @@ Minecraft: Rust Edition is a Rust game. A Fabric JAR is not a data pack: its met
 
 The `horizon-jvm` crate is a first runtime building block. A caller supplies class bytes; the crate loads up to 1,024 classes and 128 MiB total. A test can run a public static method that takes and returns Java `int` values. That method can create up to 4,096 objects. Each object can hold up to 4,096 inherited or local `int` fields, with a total heap cap of 262,144 fields. The runtime supports constructors, `getfield`, `putfield`, `invokevirtual`, `invokespecial`, `invokeinterface`, and `invokestatic` for the small set of int-only methods it understands. It follows class parents, dispatches overrides, and can use one clear interface default method. It rejects missing links, cycles, and competing interface defaults. References use internal handles, and null field or method access returns a clear error.
 
+
+The instruction set also includes integer arithmetic and branches. It checks instruction boundaries and local-variable use, rejects bytecode it does not understand, caps each run at ten million instructions, nested calls at 64 frames, and class hierarchies at 128 levels and 65,536 links. It rejects classes with initialization code and only allocates concrete classes whose instance fields are all `int`. The reader is not a full JVM class verifier. It is not connected to the game or mod loader. It does not load a Fabric mod, call a Fabric entrypoint, support arrays, implement a Minecraft Java API, apply Mixins, or claim compatibility with any mod.
+
 ## Ristretto callback proof
 
 The separate `rust-edition-java` crate wraps patched Ristretto VM 0.34. The caller gives it a Ristretto library home, mod class paths and Rust native-method functions. It runs in interpreted mode. A tiny class built by `javac` calls a Rust `hostCall` function and gets `42`. The test also checks that an unregistered native method fails with `UnsatisfiedLinkError`, and a Rust callback does not replace ordinary Java bytecode. Java sources and class files stay in a temporary test folder.
 
-Ristretto 0.34 prefers a JDK's `lib/modules` image when that image and `jmods` are both present. In this adapter, that path fails to load `java.lang.ThreadGroup`. The helper `tools/prepare_ristretto_java_home.py` makes an ignored scratch home with `release` and `jmods/java.base.jmod`; it copies `java.base.jmod` from a normal JDK, or extracts `java.base` with `jimage` and rebuilds it with `jmod` when the JDK has no JMODs. This small library home is enough for the adapter fixture. It is not enough to run Fabric mods.
+Ristretto 0.34 prefers a JDK's `lib/modules` image when that image and `jmods` are both present. In this adapter, that path fails to load `java.lang.ThreadGroup`. The helper `tools/prepare_ristretto_java_home.py` makes an ignored scratch home with `release`, `jmods/java.base.jmod`, and the JDK's `lib/tzdb.dat` time-zone file. It copies `java.base.jmod` from a normal JDK, or extracts `java.base` with `jimage` and rebuilds it with `jmod` when the JDK has no JMODs. This small library home is enough for the adapter fixtures. It is not enough to run Fabric mods.
 
-This proves only that Ristretto can run a supplied Java class and call a registered Rust function. The game and loader do not use this crate yet. It does not load a Fabric JAR, call a Fabric entrypoint, provide Minecraft or Fabric classes, apply Mixins, or make any installed mod compatible.
+Further Java 25 comparisons check file URLs for class folders and JARs whose paths contain spaces, Unicode, `#` and `%`. A separate check verifies text normalization, the `java.base` module name, and denial of access to a private Java resource. These checks use original test classes. The JMOD module fix currently maps only `java.base`; it does not map every Java module.
+
+Native callbacks can also use caller-owned Rust state. A two-VM test checks that their counters
+stay separate and that dropping the adapter releases its state. Dropping the adapter does not
+stop Ristretto's Java threads. Another Java comparison checks folder creation with missing
+parents, existing files, and linked folders on Unix hosts.
+
+This proves that Ristretto can run these supplied Java classes and call a registered Rust function. The game and loader do not use this crate yet. It does not load a Fabric JAR, call a Fabric entrypoint, provide Minecraft or Fabric classes, apply Mixins, or make any installed mod compatible.
 
 ## Next step toward a game bridge
 
@@ -19,8 +29,6 @@ Build a separate, opt-in `horizon-fabric-bridge` for Java mods. Keep it out of t
 The first useful bridge is one small vertical slice: read `fabric.mod.json` from an installed JAR, add its declared entrypoint and required JARs to `JavaVm::new`, provide the Fabric classes that entrypoint needs, and call `ModInitializer.onInitialize`. Add one supported tick event whose Rust native function registers a Java callback. At `Game::tick_mods` in `crates/horizon-client/src/game/mods.rs`, deliver a copied game snapshot and collect bounded actions, following the snapshot pattern already used by `crates/horizon-mods`. Never hand Java code a mutable pointer to `Game`.
 
 First prove that route with a small Java JAR built in a test: its initializer registers the tick event, and the game test hook confirms the callback ran. Then try one installed mod whose listed classes and calls fit that same supported slice. Use `crates/horizon-port-pack/src/classes.rs` to flag Mixins and other unsupported code early; its scan is an inventory, not a loader. Add more events and Java/Fabric classes only when a fixture tests them. This path gets one selected mod through the native bridge; it does not make arbitrary Fabric mods compatible.
-
-The instruction set also includes integer arithmetic and branches. It checks instruction boundaries and local-variable use, rejects bytecode it does not understand, caps each run at ten million instructions, nested calls at 64 frames, and class hierarchies at 128 levels and 65,536 links. It rejects classes with initialization code and only allocates concrete classes whose instance fields are all `int`. The reader is not a full JVM class verifier. It is not connected to the game or mod loader. It does not load a Fabric mod, call a Fabric entrypoint, support arrays, implement a Minecraft Java API, apply Mixins, or claim compatibility with any mod.
 
 ## What a full runtime needs
 
@@ -60,8 +68,8 @@ export CARGO_TARGET_DIR="$PWD/.local/ristretto-evaluation/target"
 cargo test --release --manifest-path crates/rust-edition-java/Cargo.toml
 ```
 
-The helper writes only a `release` file and `java.base.jmod` under ignored `.local/` scratch space.
-The test compiles one original Java fixture into a temporary folder. It is not a Fabric or game test.
+The helper writes `release`, `java.base.jmod`, and `lib/tzdb.dat` under ignored `.local/` scratch space.
+The tests compile original Java fixtures into temporary folders and compare their results with Java 25. They are not Fabric or game tests.
 
 ## Read installed mod metadata
 

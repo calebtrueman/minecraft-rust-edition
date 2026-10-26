@@ -1,0 +1,85 @@
+[package]
+authors.workspace = true
+categories.workspace = true
+description = "A library for loading Java classes."
+edition.workspace = true
+keywords = ["java", "jvm", "classloader", "class"]
+license.workspace = true
+name = "ristretto_classloader"
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ahash = { workspace = true }
+bytemuck = { workspace = true }
+dashmap = { workspace = true }
+flate2 = { workspace = true }
+indexmap = { workspace = true }
+memchr = { workspace = true }
+parking_lot = { workspace = true }
+ristretto_classfile = { path = "../ristretto_classfile", version = "0.34.0" }
+ristretto_gc = { path = "../ristretto_gc", version = "0.34.0" }
+ristretto_jimage = { path = "../ristretto_jimage", version = "0.34.0" }
+serde = { workspace = true, features = ["derive"] }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+url = "2.5.8"
+zerocopy = { workspace = true }
+zip = { workspace = true, features = ["deflate"] }
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+reqwest = { workspace = true, default-features = false, features = ["http2", "json", "query"] }
+rustls = { workspace = true, features = ["ring"], optional = true }
+tokio = { workspace = true, features = ["fs"] }
+
+[target.'cfg(not(all(target_family = "wasm", target_os = "unknown")))'.dependencies]
+dirs = { workspace = true }
+serde_json = { workspace = true }
+tar = { workspace = true }
+tempfile = { workspace = true }
+walkdir = { workspace = true }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+tokio = { workspace = true }
+
+[target.'cfg(target_os = "wasi")'.dependencies]
+wstd = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+indoc = { workspace = true }
+ristretto_test_util = { workspace = true }
+
+[target.'cfg(target_family = "wasm")'.dev-dependencies]
+tokio = { workspace = true }
+
+[target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+
+[features]
+default = ["tls-rustls-ring"]
+tls-native-tls = [
+    "reqwest/native-tls",
+    "reqwest/native-tls-vendored",
+]
+tls-rustls-aws-lc-rs = [
+    "reqwest/rustls",
+]
+tls-rustls-ring = [
+    "dep:rustls",
+    "reqwest/rustls-no-provider",
+]
+url = []
+
+[[bench]]
+harness = false
+name = "class_loader"
+
+[[bench]]
+harness = false
+name = "jimage"

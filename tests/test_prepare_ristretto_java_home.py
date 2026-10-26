@@ -16,6 +16,8 @@ class JavaHomeTests(unittest.TestCase):
         (self.source / "release").write_text('JAVA_VERSION="25.0.1"\n')
         (self.source / "jmods").mkdir()
         (self.source / "jmods/java.base.jmod").write_bytes(b"fixture library")
+        (self.source / "lib").mkdir()
+        (self.source / "lib/tzdb.dat").write_bytes(b"fixture time-zone database")
         self.scratch = self.root / "scratch"
         self.output = self.scratch / "home"
         for name, value in [("SCRATCH_ROOT", self.scratch), ("OUTPUT", self.output)]:
@@ -27,7 +29,9 @@ class JavaHomeTests(unittest.TestCase):
         with patch.object(prepare, "run_tool", return_value="classes/java/lang/ThreadGroup.class\n"):
             prepare.prepare(self.source, False)
         self.assertEqual((self.output / "jmods/java.base.jmod").read_bytes(), b"fixture library")
+        self.assertEqual((self.output / "lib/tzdb.dat").read_bytes(), b"fixture time-zone database")
         self.assertEqual((self.source / "jmods/java.base.jmod").read_bytes(), b"fixture library")
+        self.assertEqual((self.source / "lib/tzdb.dat").read_bytes(), b"fixture time-zone database")
         self.assertFalse((self.output / "lib/modules").exists())
         with self.assertRaisesRegex(RuntimeError, "already exists"):
             prepare.prepare(self.source, False)

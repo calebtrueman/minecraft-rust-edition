@@ -3,9 +3,11 @@
 //! This crate wraps Ristretto VM 0.34 with Java 25, explicit local class paths, and interpreted
 //! execution. It does not load Fabric or connect to the game.
 
+use std::any::Any;
 use std::collections::HashSet;
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use ristretto_vm::{ConfigurationBuilder, IntrinsicMethod, VM};
 
@@ -107,6 +109,40 @@ impl JavaVm {
         class_paths: &[PathBuf],
         native_methods: impl IntoIterator<Item = NativeMethod>,
     ) -> Result<Self> {
+        Self::new_inner(java_home, class_paths, native_methods, None).await
+    }
+
+    /// Start an interpreted Java 25 VM with caller-owned state for its native methods.
+    ///
+    /// A native method can reach the state with `thread.vm()?.host_context()` and downcast the
+    /// returned `Arc`. The state belongs to this adapter; creating another VM with a different
+    /// `Arc` gives its callbacks a separate state. Dropping `JavaVm` clears the context. A callback
+    /// that already cloned the state keeps it alive until that callback returns. This does not
+    /// stop Java threads that Ristretto may still be running.
+    ///
+    /// See [`JavaVm::new`] for the Java home and class path requirements.
+    pub async fn new_with_host_context<T: Any + Send + Sync>(
+        java_home: impl AsRef<Path>,
+        class_paths: &[PathBuf],
+        native_methods: impl IntoIterator<Item = NativeMethod>,
+        host_context: Arc<T>,
+    ) -> Result<Self> {
+        let host_context: Arc<dyn Any + Send + Sync> = host_context;
+        Self::new_inner(java_home, class_paths, native_methods, Some(host_context)).await
+    }
+
+    /// Returns this VM's context when it has the requested type.
+    #[must_use]
+    pub fn host_context<T: Any + Send + Sync>(&self) -> Option<Arc<T>> {
+        self.vm.host_context()?.downcast::<T>().ok()
+    }
+
+    async fn new_inner(
+        java_home: impl AsRef<Path>,
+        class_paths: &[PathBuf],
+        native_methods: impl IntoIterator<Item = NativeMethod>,
+        host_context: Option<Arc<dyn Any + Send + Sync>>,
+    ) -> Result<Self> {
         let java_home = java_home.as_ref();
         validate_java_home(java_home)?;
         if class_paths.is_empty() {
@@ -128,6 +164,9 @@ impl JavaVm {
             .class_path(ristretto_vm::ClassPath::from(class_paths))
             .interpreted(true)
             .batch_compilation(false);
+        if let Some(host_context) = host_context {
+            builder = builder.host_context(host_context);
+        }
         let mut signatures = HashSet::new();
         for method in native_methods {
             if !signatures.insert(method.signature.clone()) {
@@ -174,6 +213,12 @@ impl JavaVm {
             .invoke(class_name, method_signature, arguments)
             .await
             .map_err(Error::from)
+    }
+}
+
+impl Drop for JavaVm {
+    fn drop(&mut self) {
+        self.vm.clear_host_context();
     }
 }
 

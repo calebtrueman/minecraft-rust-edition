@@ -8,6 +8,7 @@ on:
       - 'crates/rust-edition-java/**'
       - 'crates/rust-edition-fabric/**'
       - 'third_party/ristretto_vm/**'
+      - 'third_party/ristretto_classloader/**'
       - 'tools/prepare_ristretto_java_home.py'
       - '.github/workflows/mod-compatibility.yml'
   pull_request:
@@ -16,6 +17,7 @@ on:
       - 'crates/rust-edition-java/**'
       - 'crates/rust-edition-fabric/**'
       - 'third_party/ristretto_vm/**'
+      - 'third_party/ristretto_classloader/**'
       - 'tools/prepare_ristretto_java_home.py'
       - '.github/workflows/mod-compatibility.yml'
   workflow_dispatch:
