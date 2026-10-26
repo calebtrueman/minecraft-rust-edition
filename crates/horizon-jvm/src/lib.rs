@@ -6,7 +6,13 @@
 
 #![forbid(unsafe_code)]
 
-use std::{cell::RefCell, collections::BTreeMap, error::Error, fmt, sync::Arc};
+use std::{
+    cell::RefCell,
+    collections::{BTreeMap, BTreeSet},
+    error::Error,
+    fmt,
+    sync::Arc,
+};
 
 const MAX_CLASS_BYTES: usize = 16 << 20;
 const MAX_CODE_BYTES: usize = u16::MAX as usize;
@@ -18,6 +24,9 @@ const MAX_LOADED_CLASS_BYTES: usize = 128 << 20;
 const MAX_HEAP_OBJECTS: usize = 4096;
 const MAX_OBJECT_FIELDS: usize = 4096;
 const MAX_HEAP_FIELDS: usize = 262_144;
+const MAX_CLASS_INTERFACES: usize = 4096;
+const MAX_HIERARCHY_EDGES: usize = 65_536;
+const MAX_HIERARCHY_DEPTH: usize = 128;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VmError(String);
@@ -46,6 +55,7 @@ enum Constant {
     NameAndType { name: u16, descriptor: u16 },
     FieldRef { class: u16, name_and_type: u16 },
     MethodRef { class: u16, name_and_type: u16 },
+    InterfaceMethodRef { class: u16, name_and_type: u16 },
     Other,
 }
 
@@ -79,6 +89,7 @@ pub struct ClassFile {
     pub access_flags: u16,
     pub name: String,
     pub superclass: Option<String>,
+    pub interfaces: Vec<String>,
     pub fields: Vec<Field>,
     pub methods: BTreeMap<(String, String), Method>,
     constants: Vec<Constant>,
@@ -132,13 +143,14 @@ enum Receiver {
     Static,
     Virtual(Option<ObjectHandle>),
     Special(Option<ObjectHandle>),
+    Interface(Option<ObjectHandle>),
 }
 
 impl Receiver {
     fn object_handle(self) -> Option<Option<ObjectHandle>> {
         match self {
             Self::Static => None,
-            Self::Virtual(handle) | Self::Special(handle) => Some(handle),
+            Self::Virtual(handle) | Self::Special(handle) | Self::Interface(handle) => Some(handle),
         }
     }
 }
@@ -159,6 +171,11 @@ impl Runtime {
             return Err(VmError::new("loaded class bytes exceed the 128 MiB limit"));
         }
         let class = ClassFile::parse(bytes)?;
+        if class.name == "java/lang/Object" {
+            return Err(VmError::new(
+                "java/lang/Object is a built-in root and cannot be replaced",
+            ));
+        }
         if self.classes.contains_key(&class.name) {
             return Err(VmError::new(format!(
                 "class already loaded: {}",
@@ -169,6 +186,399 @@ impl Runtime {
         self.loaded_bytes += bytes.len();
         self.classes.insert(name.clone(), Arc::new(class));
         Ok(name)
+    }
+
+    fn validate_hierarchy(&self) -> Result<()> {
+        let mut edge_count = 0_usize;
+        for class in self.classes.values() {
+            edge_count = edge_count
+                .checked_add(class.interfaces.len())
+                .ok_or_else(|| VmError::new("class hierarchy size overflow"))?;
+            if class
+                .superclass
+                .as_deref()
+                .is_some_and(|parent| parent != "java/lang/Object")
+            {
+                edge_count = edge_count
+                    .checked_add(1)
+                    .ok_or_else(|| VmError::new("class hierarchy size overflow"))?;
+            }
+            if edge_count > MAX_HIERARCHY_EDGES {
+                return Err(VmError::new("class hierarchy exceeds the 65536-link limit"));
+            }
+            if class.access_flags & 0x0200 != 0 {
+                if class.superclass.as_deref() != Some("java/lang/Object") {
+                    return Err(VmError::new(format!(
+                        "interface has an unsupported parent class: {}",
+                        class.name
+                    )));
+                }
+            } else if class.superclass.is_none() {
+                return Err(VmError::new(format!(
+                    "class is missing its parent class: {}",
+                    class.name
+                )));
+            }
+        }
+        let mut marks = BTreeMap::new();
+        for name in self.classes.keys() {
+            self.visit_hierarchy(name, 0, &mut marks)?;
+        }
+        let mut heights = BTreeMap::new();
+        for name in self.classes.keys() {
+            self.hierarchy_height(name, &mut heights, 0)?;
+        }
+        Ok(())
+    }
+
+    fn hierarchy_height(
+        &self,
+        name: &str,
+        heights: &mut BTreeMap<String, usize>,
+        depth: usize,
+    ) -> Result<usize> {
+        if name == "java/lang/Object" {
+            return Ok(0);
+        }
+        if depth > MAX_LOADED_CLASSES {
+            return Err(VmError::new("class hierarchy is too deep to inspect"));
+        }
+        if let Some(height) = heights.get(name) {
+            return Ok(*height);
+        }
+        let class = self
+            .classes
+            .get(name)
+            .ok_or_else(|| VmError::new(format!("class not loaded: {name}")))?;
+        let mut height = 1;
+        if let Some(parent) = class
+            .superclass
+            .as_deref()
+            .filter(|parent| *parent != "java/lang/Object")
+        {
+            height = height.max(self.hierarchy_height(parent, heights, depth + 1)? + 1);
+        }
+        for interface in &class.interfaces {
+            height = height.max(self.hierarchy_height(interface, heights, depth + 1)? + 1);
+        }
+        if height > MAX_HIERARCHY_DEPTH {
+            return Err(VmError::new("class hierarchy exceeds the 128-level limit"));
+        }
+        heights.insert(name.to_owned(), height);
+        Ok(height)
+    }
+
+    fn visit_hierarchy(
+        &self,
+        name: &str,
+        depth: usize,
+        marks: &mut BTreeMap<String, u8>,
+    ) -> Result<()> {
+        if name == "java/lang/Object" {
+            return Ok(());
+        }
+        if depth > MAX_HIERARCHY_DEPTH {
+            return Err(VmError::new("class hierarchy exceeds the 128-level limit"));
+        }
+        match marks.get(name).copied() {
+            Some(1) => return Err(VmError::new(format!("class hierarchy cycle at {name}"))),
+            Some(2) => return Ok(()),
+            _ => {}
+        }
+        let class = self
+            .classes
+            .get(name)
+            .ok_or_else(|| VmError::new(format!("class not loaded: {name}")))?;
+        marks.insert(name.to_owned(), 1);
+
+        if let Some(parent_name) = class.superclass.as_deref() {
+            if parent_name != "java/lang/Object" {
+                let parent = self.classes.get(parent_name).ok_or_else(|| {
+                    VmError::new(format!("parent class not loaded: {parent_name}"))
+                })?;
+                if parent.access_flags & 0x0200 != 0 {
+                    return Err(VmError::new(format!(
+                        "class parent is an interface: {parent_name}"
+                    )));
+                }
+                self.visit_hierarchy(parent_name, depth + 1, marks)?;
+            }
+        }
+        for interface_name in &class.interfaces {
+            let interface = self
+                .classes
+                .get(interface_name)
+                .ok_or_else(|| VmError::new(format!("interface not loaded: {interface_name}")))?;
+            if interface.access_flags & 0x0200 == 0 {
+                return Err(VmError::new(format!(
+                    "implemented type is not an interface: {interface_name}"
+                )));
+            }
+            self.visit_hierarchy(interface_name, depth + 1, marks)?;
+        }
+        marks.insert(name.to_owned(), 2);
+        Ok(())
+    }
+
+    fn is_instance_of(&self, actual_name: &str, target_name: &str) -> Result<bool> {
+        if actual_name == target_name || target_name == "java/lang/Object" {
+            return Ok(true);
+        }
+        let target = self
+            .classes
+            .get(target_name)
+            .ok_or_else(|| VmError::new(format!("class not loaded: {target_name}")))?;
+        if target.access_flags & 0x0200 != 0 {
+            let mut interfaces = BTreeSet::new();
+            self.collect_class_interfaces(actual_name, &mut interfaces)?;
+            Ok(interfaces.contains(target_name))
+        } else {
+            let mut current = Some(actual_name);
+            while let Some(name) = current {
+                if name == target_name {
+                    return Ok(true);
+                }
+                if name == "java/lang/Object" {
+                    break;
+                }
+                let class = self
+                    .classes
+                    .get(name)
+                    .ok_or_else(|| VmError::new(format!("class not loaded: {name}")))?;
+                current = class.superclass.as_deref();
+            }
+            Ok(false)
+        }
+    }
+
+    fn collect_class_interfaces(
+        &self,
+        class_name: &str,
+        found: &mut BTreeSet<String>,
+    ) -> Result<()> {
+        let mut current = Some(class_name);
+        while let Some(name) = current {
+            if name == "java/lang/Object" {
+                break;
+            }
+            let class = self
+                .classes
+                .get(name)
+                .ok_or_else(|| VmError::new(format!("class not loaded: {name}")))?;
+            for interface_name in &class.interfaces {
+                self.collect_interface_tree(interface_name, found)?;
+            }
+            current = class.superclass.as_deref();
+        }
+        Ok(())
+    }
+
+    fn collect_interface_tree(
+        &self,
+        interface_name: &str,
+        found: &mut BTreeSet<String>,
+    ) -> Result<()> {
+        if !found.insert(interface_name.to_owned()) {
+            return Ok(());
+        }
+        let interface = self
+            .classes
+            .get(interface_name)
+            .ok_or_else(|| VmError::new(format!("interface not loaded: {interface_name}")))?;
+        for parent in &interface.interfaces {
+            self.collect_interface_tree(parent, found)?;
+        }
+        Ok(())
+    }
+
+    fn lookup_class_method<'a>(
+        &'a self,
+        start: &str,
+        method_name: &str,
+        descriptor: &str,
+    ) -> Result<Option<(&'a ClassFile, &'a Method)>> {
+        let mut current = Some(start);
+        while let Some(name) = current {
+            if name == "java/lang/Object" {
+                return Ok(None);
+            }
+            let class = self
+                .classes
+                .get(name)
+                .ok_or_else(|| VmError::new(format!("class not loaded: {name}")))?;
+            if let Some(method) = class
+                .methods
+                .get(&(method_name.to_owned(), descriptor.to_owned()))
+            {
+                return Ok(Some((class, method)));
+            }
+            current = class.superclass.as_deref();
+        }
+        Ok(None)
+    }
+
+    fn interface_method<'a>(
+        &'a self,
+        interface_name: &str,
+        method_name: &str,
+        descriptor: &str,
+    ) -> Result<Option<(&'a ClassFile, &'a Method)>> {
+        let interface = self
+            .classes
+            .get(interface_name)
+            .ok_or_else(|| VmError::new(format!("interface not loaded: {interface_name}")))?;
+        if interface.access_flags & 0x0200 == 0 {
+            return Err(VmError::new(format!(
+                "implemented type is not an interface: {interface_name}"
+            )));
+        }
+        let mut pending = vec![interface_name.to_owned()];
+        let mut seen = BTreeSet::new();
+        let mut candidates = Vec::new();
+        while let Some(name) = pending.pop() {
+            if !seen.insert(name.clone()) {
+                continue;
+            }
+            let current = self
+                .classes
+                .get(&name)
+                .ok_or_else(|| VmError::new(format!("interface not loaded: {name}")))?;
+            if let Some(method) = current
+                .methods
+                .get(&(method_name.to_owned(), descriptor.to_owned()))
+            {
+                candidates.push((current.as_ref(), method));
+                continue;
+            }
+            pending.extend(current.interfaces.iter().cloned());
+        }
+        let maximal = self.maximal_interface_methods(candidates)?;
+        if maximal.len() > 1
+            && maximal
+                .iter()
+                .filter(|(_, method)| method_is_default(method))
+                .count()
+                > 1
+        {
+            return Err(VmError::new(format!(
+                "ambiguous interface default methods: {interface_name}.{method_name}{descriptor}"
+            )));
+        }
+        Ok(maximal.into_iter().next())
+    }
+
+    fn maximal_interface_methods<'a>(
+        &'a self,
+        candidates: Vec<(&'a ClassFile, &'a Method)>,
+    ) -> Result<Vec<(&'a ClassFile, &'a Method)>> {
+        let mut maximal = Vec::new();
+        for candidate in &candidates {
+            let mut shadowed = false;
+            for other in &candidates {
+                if candidate.0.name != other.0.name
+                    && self.is_interface_subtype(&other.0.name, &candidate.0.name)?
+                {
+                    shadowed = true;
+                    break;
+                }
+            }
+            if !shadowed {
+                maximal.push(*candidate);
+            }
+        }
+        maximal.sort_by(|left, right| left.0.name.cmp(&right.0.name));
+        maximal.dedup_by(|left, right| left.0.name == right.0.name);
+        Ok(maximal)
+    }
+
+    fn is_interface_subtype(&self, subtype: &str, supertype: &str) -> Result<bool> {
+        if subtype == supertype {
+            return Ok(true);
+        }
+        let interface = self
+            .classes
+            .get(subtype)
+            .ok_or_else(|| VmError::new(format!("interface not loaded: {subtype}")))?;
+        for parent in &interface.interfaces {
+            if self.is_interface_subtype(parent, supertype)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn resolve_interface_dispatch<'a>(
+        &'a self,
+        actual_class: &str,
+        interface_name: &str,
+        method_name: &str,
+        descriptor: &str,
+    ) -> Result<(&'a ClassFile, &'a Method)> {
+        let (_, referenced_method) = self
+            .interface_method(interface_name, method_name, descriptor)?
+            .ok_or_else(|| {
+                VmError::new(format!(
+                    "method not found: {interface_name}.{method_name}{descriptor}"
+                ))
+            })?;
+        if referenced_method.access_flags & 0x0008 != 0 {
+            return Err(VmError::new("invokeinterface target is static"));
+        }
+        if referenced_method.access_flags & 0x0001 == 0 {
+            return Err(VmError::new("interface method is not public"));
+        }
+        if !self.is_instance_of(actual_class, interface_name)? {
+            return Err(VmError::new(format!(
+                "object does not implement interface: {interface_name}"
+            )));
+        }
+        if let Some((class, method)) =
+            self.lookup_class_method(actual_class, method_name, descriptor)?
+        {
+            if method.access_flags & 0x0008 != 0 {
+                return Err(VmError::new("interface implementation is static"));
+            }
+            if method.access_flags & 0x0400 != 0 || method.code.is_none() {
+                return Err(VmError::new(
+                    "interface method has no concrete implementation",
+                ));
+            }
+            if method.access_flags & 0x0001 == 0 {
+                return Err(VmError::new("interface implementation is not public"));
+            }
+            return Ok((class, method));
+        }
+
+        let mut interfaces = BTreeSet::new();
+        self.collect_class_interfaces(actual_class, &mut interfaces)?;
+        let mut candidates = Vec::new();
+        for name in interfaces {
+            if let Some(candidate) = self.interface_method(&name, method_name, descriptor)? {
+                candidates.push(candidate);
+            }
+        }
+        let maximal = self.maximal_interface_methods(candidates)?;
+        let defaults: Vec<_> = maximal
+            .iter()
+            .copied()
+            .filter(|(_, method)| method_is_default(method))
+            .collect();
+        if defaults.len() > 1 {
+            return Err(VmError::new(format!(
+                "ambiguous interface default methods: {actual_class}.{method_name}{descriptor}"
+            )));
+        }
+        if maximal.len() > 1 && !defaults.is_empty() {
+            return Err(VmError::new(format!(
+                "conflicting abstract and default interface methods: {actual_class}.{method_name}{descriptor}"
+            )));
+        }
+        if let Some(candidate) = defaults.into_iter().next() {
+            return Ok(candidate);
+        }
+        Err(VmError::new(format!(
+            "interface method has no implementation: {interface_name}.{method_name}{descriptor}"
+        )))
     }
 
     /// Run a loaded static method with only `int` arguments and an `int` result.
@@ -182,6 +592,7 @@ impl Runtime {
         step_limit: u64,
     ) -> Result<i32> {
         *self.heap.borrow_mut() = Heap::default();
+        self.validate_hierarchy()?;
         let values: Vec<Value> = args.iter().copied().map(Value::Int).collect();
         let mut budget = InstructionBudget {
             steps: 0,
@@ -220,30 +631,35 @@ impl Runtime {
                 "cannot allocate abstract class: {class_name}"
             )));
         }
-        if class.methods.keys().any(|(name, _)| name == "<clinit>") {
-            return Err(VmError::new(format!(
-                "class initialization is not supported: {class_name}"
-            )));
-        }
-        if class.superclass.as_deref() != Some("java/lang/Object") {
-            return Err(VmError::new(format!(
-                "only classes directly based on java/lang/Object can be allocated: {class_name}"
-            )));
-        }
-        let instance_fields: Vec<_> = class
-            .fields
+        let chain = self.class_chain(class_name)?;
+        if let Some(initialized_class) = chain
             .iter()
-            .filter(|field| field.access_flags & 0x0008 == 0)
-            .collect();
-        if instance_fields.len() > MAX_OBJECT_FIELDS {
-            return Err(VmError::new(
-                "object field count exceeds the 4096-field limit",
-            ));
+            .find(|class| class.methods.keys().any(|(name, _)| name == "<clinit>"))
+        {
+            return Err(VmError::new(format!(
+                "class initialization is not supported: {}",
+                initialized_class.name
+            )));
         }
-        if instance_fields.iter().any(|field| field.descriptor != "I") {
-            return Err(VmError::new(
-                "only instance int fields are supported for allocated objects",
-            ));
+        let mut field_count = 0_usize;
+        for current in &chain {
+            for field in current
+                .fields
+                .iter()
+                .filter(|field| field.access_flags & 0x0008 == 0)
+            {
+                field_count += 1;
+                if field_count > MAX_OBJECT_FIELDS {
+                    return Err(VmError::new(
+                        "object field count exceeds the 4096-field limit",
+                    ));
+                }
+                if field.descriptor != "I" {
+                    return Err(VmError::new(
+                        "only instance int fields are supported for allocated objects",
+                    ));
+                }
+            }
         }
 
         let mut heap = self.heap.borrow_mut();
@@ -252,7 +668,7 @@ impl Runtime {
         }
         let field_slots = heap
             .field_slots
-            .checked_add(instance_fields.len())
+            .checked_add(field_count)
             .ok_or_else(|| VmError::new("object field storage size overflow"))?;
         if field_slots > MAX_HEAP_FIELDS {
             return Err(VmError::new(
@@ -262,14 +678,54 @@ impl Runtime {
         let handle = heap.objects.len();
         heap.objects.push(Object {
             class: Arc::clone(class),
-            fields: vec![0; instance_fields.len()],
+            fields: vec![0; field_count],
         });
         heap.field_slots = field_slots;
         Ok(handle)
     }
 
+    fn class_chain(&self, class_name: &str) -> Result<Vec<Arc<ClassFile>>> {
+        let mut chain = Vec::new();
+        let mut current = Some(class_name);
+        while let Some(name) = current {
+            if name == "java/lang/Object" {
+                break;
+            }
+            if chain.len() >= MAX_HIERARCHY_DEPTH {
+                return Err(VmError::new("class hierarchy exceeds the 128-level limit"));
+            }
+            let class = self
+                .classes
+                .get(name)
+                .ok_or_else(|| VmError::new(format!("class not loaded: {name}")))?;
+            chain.push(Arc::clone(class));
+            current = class.superclass.as_deref();
+        }
+        Ok(chain)
+    }
+
+    fn member_accessible(&self, flags: u16, caller: &str, owner: &str) -> Result<bool> {
+        if flags & 0x0001 != 0 {
+            return Ok(true);
+        }
+        if flags & 0x0002 != 0 {
+            return Ok(caller == owner);
+        }
+        fn package(name: &str) -> &str {
+            name.rsplit_once('/').map_or("", |(package, _)| package)
+        }
+        if package(caller) == package(owner) {
+            return Ok(true);
+        }
+        if flags & 0x0004 != 0 {
+            return self.is_instance_of(caller, owner);
+        }
+        Ok(false)
+    }
+
     fn instance_field_index(
         &self,
+        actual_class: &str,
         owner: &str,
         name: &str,
         descriptor: &str,
@@ -279,7 +735,8 @@ impl Runtime {
             .classes
             .get(owner)
             .ok_or_else(|| VmError::new(format!("class not loaded: {owner}")))?;
-        let mut instance_index = 0;
+        let mut field_index = 0;
+        let mut found_index = None;
         for field in &class.fields {
             let is_static = field.access_flags & 0x0008 != 0;
             if field.name == name && field.descriptor == descriptor {
@@ -293,19 +750,33 @@ impl Runtime {
                         "only int fields are supported: {owner}.{name}:{descriptor}"
                     )));
                 }
-                if !method_accessible(field.access_flags, caller, owner) {
+                if !self.member_accessible(field.access_flags, caller, owner)? {
                     return Err(VmError::new(format!(
                         "field access denied: {owner}.{name}:{descriptor}"
                     )));
                 }
-                return Ok(instance_index);
+                found_index = Some(field_index);
+                break;
             }
             if !is_static {
-                instance_index += 1;
+                field_index += 1;
             }
         }
+        let field_index = found_index
+            .ok_or_else(|| VmError::new(format!("field not found: {owner}.{name}:{descriptor}")))?;
+        let mut offset = 0;
+        for current in self.class_chain(actual_class)? {
+            if current.name == owner {
+                return Ok(offset + field_index);
+            }
+            offset += current
+                .fields
+                .iter()
+                .filter(|field| field.access_flags & 0x0008 == 0)
+                .count();
+        }
         Err(VmError::new(format!(
-            "field not found: {owner}.{name}:{descriptor}"
+            "field receiver class mismatch: expected {owner}, found {actual_class}"
         )))
     }
 
@@ -317,18 +788,21 @@ impl Runtime {
         descriptor: &str,
         caller: &str,
     ) -> Result<i32> {
-        let index = self.instance_field_index(owner, name, descriptor, caller)?;
+        let actual_class = self
+            .heap
+            .borrow()
+            .objects
+            .get(handle)
+            .ok_or_else(|| VmError::new("invalid object reference"))?
+            .class
+            .name
+            .clone();
+        let index = self.instance_field_index(&actual_class, owner, name, descriptor, caller)?;
         let heap = self.heap.borrow();
         let object = heap
             .objects
             .get(handle)
             .ok_or_else(|| VmError::new("invalid object reference"))?;
-        if object.class.name != owner {
-            return Err(VmError::new(format!(
-                "field receiver class mismatch: expected {owner}, found {}",
-                object.class.name
-            )));
-        }
         object
             .fields
             .get(index)
@@ -345,18 +819,21 @@ impl Runtime {
         caller: &str,
         value: i32,
     ) -> Result<()> {
-        let index = self.instance_field_index(owner, name, descriptor, caller)?;
+        let actual_class = self
+            .heap
+            .borrow()
+            .objects
+            .get(handle)
+            .ok_or_else(|| VmError::new("invalid object reference"))?
+            .class
+            .name
+            .clone();
+        let index = self.instance_field_index(&actual_class, owner, name, descriptor, caller)?;
         let mut heap = self.heap.borrow_mut();
         let object = heap
             .objects
             .get_mut(handle)
             .ok_or_else(|| VmError::new("invalid object reference"))?;
-        if object.class.name != owner {
-            return Err(VmError::new(format!(
-                "field receiver class mismatch: expected {owner}, found {}",
-                object.class.name
-            )));
-        }
         *object
             .fields
             .get_mut(index)
@@ -372,15 +849,19 @@ impl Runtime {
         if call.depth >= MAX_CALL_DEPTH {
             return Err(VmError::new("method call depth limit reached"));
         }
-        let actual_object = if let Some(handle) = call.receiver.object_handle() {
+        let actual_class = if let Some(handle) = call.receiver.object_handle() {
             let handle =
                 handle.ok_or_else(|| VmError::new("null object reference at method call"))?;
-            let heap = self.heap.borrow();
-            let object = heap
-                .objects
-                .get(handle)
-                .ok_or_else(|| VmError::new("invalid object reference"))?;
-            Some((object.class.name.clone(), object.class.superclass.clone()))
+            Some(
+                self.heap
+                    .borrow()
+                    .objects
+                    .get(handle)
+                    .ok_or_else(|| VmError::new("invalid object reference"))?
+                    .class
+                    .name
+                    .clone(),
+            )
         } else {
             None
         };
@@ -389,69 +870,190 @@ impl Runtime {
             && call.method_name == "<init>"
             && call.descriptor == "()V"
         {
-            return match actual_object {
-                Some((_, Some(parent))) if parent == "java/lang/Object" => Ok(None),
-                _ => Err(VmError::new(
-                    "java/lang/Object constructor needs an object based on Object",
-                )),
-            };
-        }
-        if let Some((actual_class, _)) = actual_object {
-            if actual_class != call.class_name {
-                return Err(VmError::new(format!(
-                    "method receiver class mismatch: expected {}, found {actual_class}",
-                    call.class_name
-                )));
+            let caller = call
+                .caller
+                .ok_or_else(|| VmError::new("Object constructor needs a class caller"))?;
+            let caller_class = self
+                .classes
+                .get(caller)
+                .ok_or_else(|| VmError::new(format!("class not loaded: {caller}")))?;
+            if caller_class.superclass.as_deref() != Some("java/lang/Object")
+                || !self.is_instance_of(actual_class.as_deref().unwrap_or_default(), caller)?
+            {
+                return Err(VmError::new(
+                    "java/lang/Object constructor needs a direct child object",
+                ));
             }
+            return Ok(None);
         }
-        let class = self
+
+        let symbolic = self
             .classes
             .get(call.class_name)
             .ok_or_else(|| VmError::new(format!("class not loaded: {}", call.class_name)))?;
-        let method = class
-            .methods
-            .get(&(call.method_name.to_owned(), call.descriptor.to_owned()))
-            .ok_or_else(|| {
-                VmError::new(format!(
-                    "method not found: {}.{}{}",
-                    call.class_name, call.method_name, call.descriptor
-                ))
-            })?;
+        let is_interface = symbolic.access_flags & 0x0200 != 0;
+        let (class, method) = match call.receiver {
+            Receiver::Static => {
+                if is_interface {
+                    return Err(VmError::new(
+                        "static interface method calls are not supported",
+                    ));
+                }
+                self.lookup_class_method(call.class_name, call.method_name, call.descriptor)?
+                    .ok_or_else(|| {
+                        VmError::new(format!(
+                            "method not found: {}.{}{}",
+                            call.class_name, call.method_name, call.descriptor
+                        ))
+                    })?
+            }
+            Receiver::Virtual(_) => {
+                if is_interface {
+                    return Err(VmError::new(
+                        "invokevirtual cannot target an interface reference",
+                    ));
+                }
+                if call.method_name == "<init>" {
+                    return Err(VmError::new(
+                        "constructors must be called with invokespecial",
+                    ));
+                }
+                let actual = actual_class
+                    .as_deref()
+                    .ok_or_else(|| VmError::new("virtual call has no object receiver"))?;
+                if !self.is_instance_of(actual, call.class_name)? {
+                    return Err(VmError::new(format!(
+                        "method receiver is not an instance of {}",
+                        call.class_name
+                    )));
+                }
+                let (symbolic_class, symbolic_method) = self
+                    .lookup_class_method(call.class_name, call.method_name, call.descriptor)?
+                    .ok_or_else(|| {
+                        VmError::new(format!(
+                            "method not found: {}.{}{}",
+                            call.class_name, call.method_name, call.descriptor
+                        ))
+                    })?;
+                if symbolic_method.access_flags & 0x0008 != 0 {
+                    return Err(VmError::new("invokevirtual target is static"));
+                }
+                if symbolic_method.access_flags & 0x0002 != 0 {
+                    (symbolic_class, symbolic_method)
+                } else {
+                    self.lookup_class_method(actual, call.method_name, call.descriptor)?
+                        .ok_or_else(|| {
+                            VmError::new(format!(
+                                "method not found: {}.{}{}",
+                                call.class_name, call.method_name, call.descriptor
+                            ))
+                        })?
+                }
+            }
+            Receiver::Special(_) => {
+                if is_interface {
+                    return Err(VmError::new(
+                        "interface invokespecial calls are not supported",
+                    ));
+                }
+                let caller = call
+                    .caller
+                    .ok_or_else(|| VmError::new("invokespecial needs a class caller"))?;
+                let caller_class = self
+                    .classes
+                    .get(caller)
+                    .ok_or_else(|| VmError::new(format!("class not loaded: {caller}")))?;
+                let actual = actual_class
+                    .as_deref()
+                    .ok_or_else(|| VmError::new("invokespecial has no object receiver"))?;
+                if call.method_name == "<init>" {
+                    let is_new_object_constructor = actual == call.class_name;
+                    let is_direct_parent_constructor = caller_class.superclass.as_deref()
+                        == Some(call.class_name)
+                        && self.is_instance_of(actual, caller)?;
+                    if !is_new_object_constructor && !is_direct_parent_constructor {
+                        return Err(VmError::new(
+                            "constructor call must target this class or its direct parent",
+                        ));
+                    }
+                    let method = symbolic
+                        .methods
+                        .get(&(call.method_name.to_owned(), call.descriptor.to_owned()))
+                        .ok_or_else(|| {
+                            VmError::new(format!(
+                                "method not found: {}.{}{}",
+                                call.class_name, call.method_name, call.descriptor
+                            ))
+                        })?;
+                    (symbolic.as_ref(), method)
+                } else {
+                    if !self.is_instance_of(actual, caller)?
+                        || (caller != call.class_name
+                            && caller_class.superclass.as_deref() != Some(call.class_name))
+                    {
+                        return Err(VmError::new(format!(
+                            "invokespecial target is outside the caller hierarchy: {}",
+                            call.class_name
+                        )));
+                    }
+                    self.lookup_class_method(call.class_name, call.method_name, call.descriptor)?
+                        .ok_or_else(|| {
+                            VmError::new(format!(
+                                "method not found: {}.{}{}",
+                                call.class_name, call.method_name, call.descriptor
+                            ))
+                        })?
+                }
+            }
+            Receiver::Interface(_) => {
+                if !is_interface {
+                    return Err(VmError::new(
+                        "invokeinterface needs an interface method reference",
+                    ));
+                }
+                let actual = actual_class
+                    .as_deref()
+                    .ok_or_else(|| VmError::new("interface call has no object receiver"))?;
+                self.resolve_interface_dispatch(
+                    actual,
+                    call.class_name,
+                    call.method_name,
+                    call.descriptor,
+                )?
+            }
+        };
+
         let is_static = method.access_flags & 0x0008 != 0;
         if is_static != matches!(call.receiver, Receiver::Static) {
             return Err(VmError::new(format!(
                 "method static mismatch: {}.{}{}",
-                call.class_name, call.method_name, call.descriptor
+                class.name, call.method_name, call.descriptor
             )));
         }
         if method.access_flags & 0x0020 != 0 {
             return Err(VmError::new("synchronized methods are not supported"));
         }
         let accessible = match call.caller {
-            Some(caller) => method_accessible(method.access_flags, caller, call.class_name),
+            Some(caller) => self.member_accessible(method.access_flags, caller, &class.name)?,
             None => method.access_flags & 0x0001 != 0,
         };
         if !accessible {
             return Err(VmError::new(format!(
                 "method access denied: {}.{}{}",
-                call.class_name, call.method_name, call.descriptor
+                class.name, call.method_name, call.descriptor
             )));
         }
-        if class.methods.keys().any(|(name, _)| name == "<clinit>") {
+        let target_chain = self.class_chain(call.class_name)?;
+        let declaring_chain = self.class_chain(&class.name)?;
+        if target_chain
+            .iter()
+            .chain(&declaring_chain)
+            .any(|current| current.methods.keys().any(|(name, _)| name == "<clinit>"))
+        {
             return Err(VmError::new(format!(
                 "class initialization is not supported: {}",
-                call.class_name
+                class.name
             )));
-        }
-        match class.superclass.as_deref() {
-            Some("java/lang/Object") if class.name != "java/lang/Object" => {}
-            None if class.name == "java/lang/Object" => {}
-            _ => {
-                return Err(VmError::new(format!(
-                    "only classes directly based on java/lang/Object can run: {}",
-                    call.class_name
-                )));
-            }
         }
         let (arity, return_type) = method_descriptor(call.descriptor)?;
         if arity != call.args.len() {
@@ -477,6 +1079,9 @@ impl Runtime {
             return Err(VmError::new(
                 "only instance and static methods returning int are supported",
             ));
+        }
+        if method.access_flags & 0x0400 != 0 || method.code.is_none() {
+            return Err(VmError::new("abstract methods cannot run"));
         }
         let code = method
             .code
@@ -518,8 +1123,14 @@ impl ClassFile {
         };
 
         let interface_count = r.u2()? as usize;
+        if interface_count > MAX_CLASS_INTERFACES {
+            return Err(VmError::new(
+                "class interface count exceeds the 4096-interface limit",
+            ));
+        }
+        let mut interfaces = Vec::with_capacity(interface_count);
         for _ in 0..interface_count {
-            class_name(&constants, r.u2()?)?;
+            interfaces.push(class_name(&constants, r.u2()?)?);
         }
         let mut fields = Vec::new();
         let field_count = r.u2()? as usize;
@@ -579,6 +1190,7 @@ impl ClassFile {
             access_flags,
             name,
             superclass,
+            interfaces,
             fields,
             methods,
             constants,
@@ -602,18 +1214,23 @@ impl ClassFile {
         runtime.run_static_i32(&self.name, name, descriptor, args, step_limit)
     }
 
-    fn method_ref(&self, index: u16) -> Result<(String, String, String)> {
-        let (class_index, name_and_type_index) = match self.constants.get(index as usize) {
-            Some(Constant::MethodRef {
-                class,
-                name_and_type,
-            }) => (*class, *name_and_type),
-            _ => {
-                return Err(VmError::new(
-                    "constant-pool index is not a method reference",
-                ));
-            }
-        };
+    fn method_ref(&self, index: u16) -> Result<(String, String, String, bool)> {
+        let (class_index, name_and_type_index, interface_ref) =
+            match self.constants.get(index as usize) {
+                Some(Constant::MethodRef {
+                    class,
+                    name_and_type,
+                }) => (*class, *name_and_type, false),
+                Some(Constant::InterfaceMethodRef {
+                    class,
+                    name_and_type,
+                }) => (*class, *name_and_type, true),
+                _ => {
+                    return Err(VmError::new(
+                        "constant-pool index is not a method reference",
+                    ));
+                }
+            };
         let (name_index, descriptor_index) = match self.constants.get(name_and_type_index as usize)
         {
             Some(Constant::NameAndType { name, descriptor }) => (*name, *descriptor),
@@ -623,6 +1240,7 @@ impl ClassFile {
             class_name(&self.constants, class_index)?,
             utf8(&self.constants, name_index)?.to_owned(),
             utf8(&self.constants, descriptor_index)?.to_owned(),
+            interface_ref,
         ))
     }
 
@@ -673,7 +1291,11 @@ fn read_constants(r: &mut Reader<'_>) -> Result<Vec<Constant>> {
                 class: r.u2()?,
                 name_and_type: r.u2()?,
             }),
-            10 | 11 => entries.push(Constant::MethodRef {
+            10 => entries.push(Constant::MethodRef {
+                class: r.u2()?,
+                name_and_type: r.u2()?,
+            }),
+            11 => entries.push(Constant::InterfaceMethodRef {
                 class: r.u2()?,
                 name_and_type: r.u2()?,
             }),
@@ -838,17 +1460,10 @@ fn method_descriptor(descriptor: &str) -> Result<(usize, ReturnType)> {
     Ok((close - 1, return_type))
 }
 
-fn method_accessible(flags: u16, caller: &str, owner: &str) -> bool {
-    if flags & 0x0001 != 0 {
-        return true;
-    }
-    if flags & 0x0002 != 0 {
-        return caller == owner;
-    }
-    fn package(name: &str) -> &str {
-        name.rsplit_once('/').map_or("", |(package, _)| package)
-    }
-    package(caller) == package(owner)
+fn method_is_default(method: &Method) -> bool {
+    method.access_flags & 0x0001 != 0
+        && method.access_flags & (0x0002 | 0x0008 | 0x0400) == 0
+        && method.code.is_some()
 }
 
 fn run(
@@ -1035,7 +1650,13 @@ fn run(
             }
             0xb6..=0xb8 => {
                 let reference = u16::from_be_bytes([code.bytes[pc + 1], code.bytes[pc + 2]]);
-                let (target_class, target_name, target_descriptor) = class.method_ref(reference)?;
+                let (target_class, target_name, target_descriptor, interface_ref) =
+                    class.method_ref(reference)?;
+                if interface_ref {
+                    return Err(VmError::new(
+                        "class invocation needs a class method reference",
+                    ));
+                }
                 let (arity, _) = method_descriptor(&target_descriptor)?;
                 let receiver_slots = usize::from(op != 0xb8);
                 if stack.len() < arity + receiver_slots {
@@ -1069,6 +1690,46 @@ fn run(
                     Some(value) => push(&mut stack, value, stack_limit)?,
                     None if op == 0xb7 && target_name == "<init>" => {}
                     None => return Err(VmError::new("method call returned no int value")),
+                }
+            }
+            0xb9 => {
+                let reference = u16::from_be_bytes([code.bytes[pc + 1], code.bytes[pc + 2]]);
+                let (target_class, target_name, target_descriptor, interface_ref) =
+                    class.method_ref(reference)?;
+                if !interface_ref {
+                    return Err(VmError::new(
+                        "invokeinterface needs an interface method reference",
+                    ));
+                }
+                let (arity, _) = method_descriptor(&target_descriptor)?;
+                if code.bytes[pc + 4] != 0 {
+                    return Err(VmError::new("invokeinterface reserved byte must be zero"));
+                }
+                if code.bytes[pc + 3] as usize != arity + 1 {
+                    return Err(VmError::new(
+                        "invokeinterface argument count does not match the descriptor",
+                    ));
+                }
+                if stack.len() < arity + 1 {
+                    return Err(VmError::new("operand stack underflow at invokeinterface"));
+                }
+                let first_arg = stack.len() - arity;
+                let call_args: Vec<Value> = stack.drain(first_arg..).collect();
+                let receiver = Receiver::Interface(pop_ref(&mut stack)?);
+                match runtime.invoke_method(
+                    Invocation {
+                        class_name: &target_class,
+                        method_name: &target_name,
+                        descriptor: &target_descriptor,
+                        args: &call_args,
+                        caller: Some(&class.name),
+                        receiver,
+                        depth: depth + 1,
+                    },
+                    budget,
+                )? {
+                    Some(value) => push(&mut stack, value, stack_limit)?,
+                    None => return Err(VmError::new("interface method returned no int value")),
                 }
             }
             0xbb => {
@@ -1122,7 +1783,8 @@ fn instruction_len(op: u8) -> Result<usize> {
         | 0xac
         | 0xb1 => Ok(if (0x99..=0xa7).contains(&op) { 3 } else { 1 }),
         0x10 | 0x15 | 0x19 | 0x36 | 0x3a => Ok(2),
-        0x11 | 0x84 | 0xb4..=0xbb => Ok(3),
+        0x11 | 0x84 | 0xb4..=0xb8 | 0xba..=0xbb => Ok(3),
+        0xb9 => Ok(5),
         _ => Err(VmError::new(format!("unsupported opcode 0x{op:02x}"))),
     }
 }
@@ -1608,6 +2270,134 @@ mod tests {
     }
 
     #[test]
+    fn hierarchy_validation_reports_missing_links_and_cycles() {
+        let mut missing_parent = Runtime::new();
+        missing_parent
+            .load_class(&fixture_hierarchy(
+                "fixture/Child",
+                Some("fixture/Parent"),
+                &[],
+                0x0021,
+            ))
+            .unwrap();
+        assert_eq!(
+            missing_parent
+                .run_static_i32("fixture/Child", "run", "()I", &[], 10)
+                .unwrap_err()
+                .to_string(),
+            "parent class not loaded: fixture/Parent"
+        );
+
+        let mut missing_interface = Runtime::new();
+        missing_interface
+            .load_class(&fixture_hierarchy(
+                "fixture/Worker",
+                Some("java/lang/Object"),
+                &["fixture/Action"],
+                0x0021,
+            ))
+            .unwrap();
+        assert_eq!(
+            missing_interface
+                .run_static_i32("fixture/Worker", "run", "()I", &[], 10)
+                .unwrap_err()
+                .to_string(),
+            "interface not loaded: fixture/Action"
+        );
+
+        let mut cycle = Runtime::new();
+        cycle
+            .load_class(&fixture_hierarchy(
+                "fixture/First",
+                Some("fixture/Second"),
+                &[],
+                0x0021,
+            ))
+            .unwrap();
+        cycle
+            .load_class(&fixture_hierarchy(
+                "fixture/Second",
+                Some("fixture/First"),
+                &[],
+                0x0021,
+            ))
+            .unwrap();
+        assert!(
+            cycle
+                .run_static_i32("fixture/First", "run", "()I", &[], 10)
+                .unwrap_err()
+                .to_string()
+                .contains("class hierarchy cycle")
+        );
+    }
+
+    #[test]
+    fn hierarchy_depth_is_bounded_even_when_parents_load_first() {
+        let mut runtime = Runtime::new();
+        for index in 0..(MAX_HIERARCHY_DEPTH + 2) {
+            let name = format!("fixture/Depth{index}");
+            let parent = if index == 0 {
+                "java/lang/Object".to_owned()
+            } else {
+                format!("fixture/Depth{}", index - 1)
+            };
+            runtime
+                .load_class(&fixture_hierarchy(&name, Some(&parent), &[], 0x0021))
+                .unwrap();
+        }
+        assert_eq!(
+            runtime
+                .run_static_i32(
+                    &format!("fixture/Depth{}", MAX_HIERARCHY_DEPTH + 1),
+                    "run",
+                    "()I",
+                    &[],
+                    10,
+                )
+                .unwrap_err()
+                .to_string(),
+            "class hierarchy exceeds the 128-level limit"
+        );
+    }
+
+    #[test]
+    fn ambiguous_interface_defaults_are_rejected() {
+        let mut runtime = Runtime::new();
+        runtime
+            .load_class(&fixture_default_interface(
+                "fixture/Left",
+                "apply",
+                "(I)I",
+                &[0x1b, 0x04, 0x60, 0xac],
+            ))
+            .unwrap();
+        runtime
+            .load_class(&fixture_default_interface(
+                "fixture/Right",
+                "apply",
+                "(I)I",
+                &[0x1b, 0x05, 0x60, 0xac],
+            ))
+            .unwrap();
+        runtime
+            .load_class(&fixture_hierarchy(
+                "fixture/Both",
+                Some("java/lang/Object"),
+                &["fixture/Left", "fixture/Right"],
+                0x0021,
+            ))
+            .unwrap();
+        runtime.validate_hierarchy().unwrap();
+        assert_eq!(
+            runtime
+                .resolve_interface_dispatch("fixture/Both", "fixture/Left", "apply", "(I)I",)
+                .unwrap_err()
+                .to_string(),
+            "ambiguous interface default methods: fixture/Both.apply(I)I"
+        );
+    }
+
+    #[test]
     fn decodes_modified_utf8_null_and_supplementary_characters() {
         assert_eq!(decode_modified_utf8(&[0xc0, 0x80]).unwrap(), "\0");
         assert_eq!(
@@ -1660,6 +2450,64 @@ mod tests {
         fields: &[(&str, &str)],
         with_handler: bool,
     ) -> Vec<u8> {
+        let methods: Vec<_> = methods
+            .iter()
+            .map(|(name, descriptor, code)| (*name, *descriptor, *code, 0x0009))
+            .collect();
+        fixture_class_with_options(
+            class_name,
+            Some("java/lang/Object"),
+            &[],
+            0x0021,
+            &methods,
+            fields,
+            with_handler,
+        )
+    }
+
+    fn fixture_hierarchy(
+        class_name: &str,
+        superclass: Option<&str>,
+        interfaces: &[&str],
+        access_flags: u16,
+    ) -> Vec<u8> {
+        fixture_class_with_options(
+            class_name,
+            superclass,
+            interfaces,
+            access_flags,
+            &[],
+            &[],
+            false,
+        )
+    }
+
+    fn fixture_default_interface(
+        name: &str,
+        method_name: &str,
+        descriptor: &str,
+        code: &[u8],
+    ) -> Vec<u8> {
+        fixture_class_with_options(
+            name,
+            Some("java/lang/Object"),
+            &[],
+            0x0601,
+            &[(method_name, descriptor, code, 0x0001)],
+            &[],
+            false,
+        )
+    }
+
+    fn fixture_class_with_options(
+        class_name: &str,
+        superclass: Option<&str>,
+        interfaces: &[&str],
+        access_flags: u16,
+        methods: &[(&str, &str, &[u8], u16)],
+        fields: &[(&str, &str)],
+        with_handler: bool,
+    ) -> Vec<u8> {
         fn utf(pool: &mut Vec<Vec<u8>>, value: &str) -> u16 {
             let mut entry = vec![1];
             entry.extend((value.len() as u16).to_be_bytes());
@@ -1676,7 +2524,11 @@ mod tests {
         }
         let mut pool = Vec::new();
         let this = class(&mut pool, class_name);
-        let parent = class(&mut pool, "java/lang/Object");
+        let parent = superclass.map_or(0, |name| class(&mut pool, name));
+        let interface_indices: Vec<_> = interfaces
+            .iter()
+            .map(|name| class(&mut pool, name))
+            .collect();
         let code_name = utf(&mut pool, "Code");
         let field_specs: Vec<_> = fields
             .iter()
@@ -1684,8 +2536,13 @@ mod tests {
             .collect();
         let specs: Vec<_> = methods
             .iter()
-            .map(|(name, descriptor, code)| {
-                (utf(&mut pool, name), utf(&mut pool, descriptor), *code)
+            .map(|(name, descriptor, code, access_flags)| {
+                (
+                    utf(&mut pool, name),
+                    utf(&mut pool, descriptor),
+                    *code,
+                    *access_flags,
+                )
             })
             .collect();
 
@@ -1694,10 +2551,13 @@ mod tests {
         for entry in pool {
             out.extend(entry);
         }
-        out.extend([0, 0x21]);
+        out.extend(access_flags.to_be_bytes());
         out.extend(this.to_be_bytes());
         out.extend(parent.to_be_bytes());
-        out.extend([0, 0]); // no interfaces
+        out.extend((interface_indices.len() as u16).to_be_bytes());
+        for interface in interface_indices {
+            out.extend(interface.to_be_bytes());
+        }
         out.extend((field_specs.len() as u16).to_be_bytes());
         for (name, descriptor) in field_specs {
             out.extend([0, 1]); // public instance field
@@ -1706,8 +2566,8 @@ mod tests {
             out.extend([0, 0]); // no field attributes
         }
         out.extend((specs.len() as u16).to_be_bytes());
-        for (name, descriptor, code) in specs {
-            out.extend([0, 9]); // public static
+        for (name, descriptor, code, access_flags) in specs {
+            out.extend(access_flags.to_be_bytes());
             out.extend(name.to_be_bytes());
             out.extend(descriptor.to_be_bytes());
             out.extend([0, 1]);

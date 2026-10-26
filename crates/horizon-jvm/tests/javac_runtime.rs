@@ -289,6 +289,185 @@ public class ObjectProgram {
     );
 }
 
+#[test]
+fn matches_javac_superclass_and_interface_dispatch_when_a_jdk_is_available() {
+    let Some((javac, java)) = java_tools() else {
+        eprintln!("skipping: set JAVA_HOME to run the javac comparison");
+        return;
+    };
+    let dir = TempDir::new();
+    let base_source = dir.0.join("ValueBase.java");
+    let interface_source = dir.0.join("IntAction.java");
+    let child_source = dir.0.join("ValueChild.java");
+    let default_action_source = dir.0.join("DefaultAction.java");
+    let program_source = dir.0.join("DispatchProgram.java");
+    fs::write(
+        &base_source,
+        r#"
+public class ValueBase {
+    protected int value;
+
+    public ValueBase(int initial) {
+        this.value = initial;
+    }
+
+    public int apply(int amount) {
+        return this.value + amount;
+    }
+}
+"#,
+    )
+    .unwrap();
+    fs::write(
+        &interface_source,
+        r#"
+public interface IntAction {
+    default int apply(int amount) {
+        return amount + 2;
+    }
+}
+"#,
+    )
+    .unwrap();
+    fs::write(
+        &child_source,
+        r#"
+public class ValueChild extends ValueBase implements IntAction {
+    public int extra;
+
+    public ValueChild(int initial) {
+        super(initial);
+        this.extra = 3;
+    }
+
+    @Override
+    public int apply(int amount) {
+        return super.apply(amount) + this.extra + 5;
+    }
+}
+"#,
+    )
+    .unwrap();
+    fs::write(
+        &default_action_source,
+        r#"
+public class DefaultAction implements IntAction {
+}
+"#,
+    )
+    .unwrap();
+    fs::write(
+        &program_source,
+        r#"
+public class DispatchProgram {
+    public static int exercise(int initial, int amount) {
+        ValueChild child = new ValueChild(initial);
+        ValueBase base = child;
+        IntAction action = child;
+        return base.apply(amount) + action.apply(amount);
+    }
+
+    public static int defaultCall(int amount) {
+        IntAction action = new DefaultAction();
+        return action.apply(amount);
+    }
+
+    public static void main(String[] args) {
+        if (args.length == 1) {
+            System.out.println(defaultCall(Integer.parseInt(args[0])));
+        } else {
+            System.out.println(exercise(Integer.parseInt(args[0]), Integer.parseInt(args[1])));
+        }
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    let compiled = Command::new(&javac)
+        .arg("-g:none")
+        .arg("-d")
+        .arg(&dir.0)
+        .arg(&base_source)
+        .arg(&interface_source)
+        .arg(&child_source)
+        .arg(&default_action_source)
+        .arg(&program_source)
+        .output()
+        .expect("run javac");
+    assert!(
+        compiled.status.success(),
+        "javac failed: {}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+
+    let mut runtime = Runtime::new();
+    for class in [
+        "DispatchProgram",
+        "ValueChild",
+        "IntAction",
+        "ValueBase",
+        "DefaultAction",
+    ] {
+        runtime
+            .load_class(&fs::read(dir.0.join(format!("{class}.class"))).unwrap())
+            .unwrap();
+    }
+    for (initial, amount) in [(2, 6), (-9, 2), (i32::MAX, 1)] {
+        let expected = Command::new(&java)
+            .arg("-cp")
+            .arg(&dir.0)
+            .arg("DispatchProgram")
+            .arg(initial.to_string())
+            .arg(amount.to_string())
+            .output()
+            .expect("run Java dispatch fixture");
+        assert!(
+            expected.status.success(),
+            "Java fixture failed: {}",
+            String::from_utf8_lossy(&expected.stderr)
+        );
+        let expected: i32 = String::from_utf8(expected.stdout)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let actual = runtime
+            .run_static_i32(
+                "DispatchProgram",
+                "exercise",
+                "(II)I",
+                &[initial, amount],
+                200,
+            )
+            .unwrap();
+        assert_eq!(actual, expected, "exercise({initial}, {amount})");
+    }
+    for amount in [-3, 0, i32::MAX] {
+        let expected = Command::new(&java)
+            .arg("-cp")
+            .arg(&dir.0)
+            .arg("DispatchProgram")
+            .arg(amount.to_string())
+            .output()
+            .expect("run Java default-method fixture");
+        assert!(
+            expected.status.success(),
+            "Java fixture failed: {}",
+            String::from_utf8_lossy(&expected.stderr)
+        );
+        let expected: i32 = String::from_utf8(expected.stdout)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let actual = runtime
+            .run_static_i32("DispatchProgram", "defaultCall", "(I)I", &[amount], 200)
+            .unwrap();
+        assert_eq!(actual, expected, "defaultCall({amount})");
+    }
+}
+
 fn java_tools() -> Option<(PathBuf, PathBuf)> {
     if let Some(home) = env::var_os("JAVA_HOME") {
         let bin = Path::new(&home).join("bin");
