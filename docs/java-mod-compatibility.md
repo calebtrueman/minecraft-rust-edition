@@ -62,3 +62,22 @@ cargo test --release --manifest-path crates/rust-edition-java/Cargo.toml
 
 The helper writes only a `release` file and `java.base.jmod` under ignored `.local/` scratch space.
 The test compiles one original Java fixture into a temporary folder. It is not a Fabric or game test.
+
+## Read installed mod metadata
+
+`crates/rust-edition-fabric` reads `fabric.mod.json` and follows the nested jars it declares.
+It reports entrypoints, dependencies, mixins, access wideners and different copies of the same
+mod ID. It does not choose versions, apply transforms, or run Java code.
+
+The reader has shared limits for archive count, nested bytes and metadata bytes, including work
+spent on failed archives. It checks duplicate ZIP names before the ZIP library can hide them.
+A directory scan keeps earlier valid results and reports file errors or a reached limit.
+
+To inspect a mod folder without changing its jars:
+
+```sh
+cargo run --manifest-path crates/rust-edition-fabric/Cargo.toml --example inspect -- /path/to/mods
+```
+
+See [the reader's notes](../crates/rust-edition-fabric/README.md) for its exact scope and Fabric
+format references. The GitHub mod checks run this crate's tests separately from the game.

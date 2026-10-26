@@ -1,0 +1,92 @@
+name: Rust mod compatibility checks
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/horizon-jvm/**'
+      - 'crates/rust-edition-java/**'
+      - 'crates/rust-edition-fabric/**'
+      - 'third_party/ristretto_vm/**'
+      - 'tools/prepare_ristretto_java_home.py'
+      - '.github/workflows/mod-compatibility.yml'
+  pull_request:
+    paths:
+      - 'crates/horizon-jvm/**'
+      - 'crates/rust-edition-java/**'
+      - 'crates/rust-edition-fabric/**'
+      - 'third_party/ristretto_vm/**'
+      - 'tools/prepare_ristretto_java_home.py'
+      - '.github/workflows/mod-compatibility.yml'
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  java-runtime:
+    name: Rust bytecode tests against Java 25
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+      - run: cargo fmt --manifest-path crates/horizon-jvm/Cargo.toml --all -- --check
+      - run: cargo test --manifest-path crates/horizon-jvm/Cargo.toml --locked
+      - run: cargo clippy --manifest-path crates/horizon-jvm/Cargo.toml --locked --all-targets -- -D warnings
+
+  java-bridge:
+    name: Java code calling Rust
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      RUST_EDITION_JAVA25_HOME: ${{ github.workspace }}/.local/ristretto-evaluation/java25-modules-home
+      CARGO_INCREMENTAL: '0'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/rust-edition-java
+          shared-key: rust-edition-java
+      - name: Prepare local Java library files
+        run: python3 tools/prepare_ristretto_java_home.py --java-home "$JAVA_HOME"
+      - run: cargo fmt --manifest-path crates/rust-edition-java/Cargo.toml --all -- --check
+      - run: cargo test --release --manifest-path crates/rust-edition-java/Cargo.toml --locked
+      - run: cargo clippy --release --manifest-path crates/rust-edition-java/Cargo.toml --locked --all-targets -- -D warnings
+
+  fabric-metadata:
+    name: Read Fabric mod files
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/rust-edition-fabric
+          shared-key: rust-edition-fabric
+      - run: cargo fmt --manifest-path crates/rust-edition-fabric/Cargo.toml --all -- --check
+      - run: cargo test --manifest-path crates/rust-edition-fabric/Cargo.toml --locked
+      - run: cargo clippy --manifest-path crates/rust-edition-fabric/Cargo.toml --locked --all-targets -- -D warnings
