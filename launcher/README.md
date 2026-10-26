@@ -1,3 +1,15 @@
+# Minecraft: Rust Edition launcher
+
+This fork is still being built. See the [fork status](../README.md) before trying it.
+The launcher now offers **Settings → Existing Minecraft account → Use Prism account**.
+It reads an existing Minecraft session and checks it with Minecraft's service. If it expires,
+launch Minecraft through Prism while online, then retry here. Gameplay here stays in Rust.
+Java/Fabric mod code is not supported. No fork release has been published yet.
+
+The notes below describe the upstream launcher; some names and release links still refer to it.
+
+---
+
 # Horizon launcher
 
 A small desktop app that installs Horizon builds, prepares them from your own copy of

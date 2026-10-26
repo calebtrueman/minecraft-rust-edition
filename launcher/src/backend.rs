@@ -9,10 +9,12 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 
-pub const REPO: &str = "ludovic111/horizon";
-pub const README_URL: &str = "https://github.com/ludovic111/horizon/blob/main/launcher/README.md";
+pub const REPO: &str = "calebtrueman/minecraft-rust-edition";
+pub const README_URL: &str =
+    "https://github.com/calebtrueman/minecraft-rust-edition/blob/main/launcher/README.md";
 /// The players' page on connecting an AI agent (the website's docs/agents.md).
-pub const AGENT_DOCS_URL: &str = "https://playhorizon.dev/docs/agents";
+pub const AGENT_DOCS_URL: &str =
+    "https://github.com/calebtrueman/minecraft-rust-edition/blob/main/docs/agent-control.md";
 /// This launcher's version: the release workflow sets `HORIZON_LAUNCHER_VERSION` from the
 /// tag it builds (no version-bump commits); other builds say Cargo.toml's.
 pub const VERSION: &str = version_or(option_env!("HORIZON_LAUNCHER_VERSION"));
@@ -370,9 +372,9 @@ impl Default for Links {
     /// What the launcher uses until (or unless) it can read links.json.
     fn default() -> Self {
         Self {
-            discord: "https://discord.gg/HcTeMZxe5E".into(),
-            sponsor: "https://github.com/sponsors/ludovic111".into(),
-            website: "https://playhorizon.dev".into(),
+            discord: "".into(),
+            sponsor: "".into(),
+            website: "https://github.com/calebtrueman/minecraft-rust-edition".into(),
         }
     }
 }
@@ -413,7 +415,7 @@ pub fn data_dir() -> PathBuf {
     }
     dirs::data_dir()
         .unwrap_or_else(std::env::temp_dir)
-        .join("horizon-launcher")
+        .join("minecraft-rust-edition-launcher")
 }
 
 fn versions_dir() -> PathBuf {
@@ -1528,8 +1530,8 @@ pub fn prepare_in_process(
     .map(|_| ())
 }
 
-/// Where the game keeps saves and options.txt: `HORIZON_HOME`, else `horizon` in the platform's
-/// data folder (~/.local/share/horizon on Linux, as the release folders' horizon.sh uses). It is
+/// Where the game keeps saves and options.txt: `HORIZON_HOME`, else `minecraft-rust-edition` in the platform's
+/// data folder. It is
 /// never inside a version folder, so installing, updating or removing a version keeps the saves.
 pub fn game_home() -> PathBuf {
     if let Some(home) = std::env::var_os("HORIZON_HOME").filter(|h| !h.is_empty()) {
@@ -1537,7 +1539,7 @@ pub fn game_home() -> PathBuf {
     }
     dirs::data_dir()
         .unwrap_or_else(std::env::temp_dir)
-        .join("horizon")
+        .join("minecraft-rust-edition")
 }
 
 /// Whether No AI is on: every AI feature hidden and off (`horizon_core::no_ai`, kept in the
@@ -3177,12 +3179,15 @@ mod tests {
     #[test]
     fn links_fall_back_to_the_built_in_ones() {
         let defaults = Links::default();
-        assert_eq!(defaults.discord, "https://discord.gg/HcTeMZxe5E");
-        assert_eq!(defaults.sponsor, "https://github.com/sponsors/ludovic111");
-        assert_eq!(defaults.website, "https://playhorizon.dev");
+        assert_eq!(defaults.discord, "");
+        assert_eq!(defaults.sponsor, "");
+        assert_eq!(
+            defaults.website,
+            "https://github.com/calebtrueman/minecraft-rust-edition"
+        );
         // The file on main says the same thing as the defaults.
         let file = Links::parse(
-            r#"{"discord": "https://discord.gg/HcTeMZxe5E", "sponsor": "https://github.com/sponsors/ludovic111", "website": "https://playhorizon.dev"}"#,
+            r#"{"discord": "", "sponsor": "", "website": "https://github.com/calebtrueman/minecraft-rust-edition"}"#,
         );
         assert_eq!(file, defaults);
         // Unreadable or missing, offline included: the defaults.

@@ -1,6 +1,6 @@
 [Desktop Entry]
 Type=Application
-Name=Horizon
+Name=Minecraft: Rust Edition
 Comment=Minecraft: Java Edition 26.3, rewritten in Rust
 Exec=horizon-client
 Icon=horizon

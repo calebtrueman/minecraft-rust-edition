@@ -859,7 +859,7 @@ impl Title {
                         ];
                     }
                 }
-                let version = format!("Horizon {} (Rust)", horizon_core::VANILLA_VERSION);
+                let version = format!("Minecraft: Rust Edition {}", horizon_core::VANILLA_VERSION);
                 batch.text(atlas, &version, 2.0, h - 10.0, u32::MAX, true);
                 let notice = "Not affiliated with Mojang or Microsoft";
                 let tw = HudBatch::text_width(atlas, notice);

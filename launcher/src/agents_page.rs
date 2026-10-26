@@ -103,7 +103,7 @@ impl Launcher {
             .line_height(px(21.))
             .child(text(theme::HEADING).text_color(t.ink).child("Connect an AI agent"))
             .child(div().max_w(px(640.)).text_color(t.muted).child(
-                "Your own agent (Claude Code, Codex, Cursor or any MCP client) can drive the launcher and the game it starts, with the same commands as the terminal. It runs on your computer and talks to Horizon there; it asks before deleting anything.",
+                "Your own agent (Claude Code, Codex, Cursor or any MCP client) can drive the launcher and the game it starts, with the same commands as the terminal. It runs on your computer and talks to Minecraft: Rust Edition there; it asks before deleting anything.",
             ))
             .child(picker);
         if let Some((program, args)) = client.add.clone() {
@@ -167,7 +167,7 @@ impl Launcher {
                         let exe = backend::exe_path().to_path_buf();
                         let task = cx.background_executor().spawn(async move {
                             match agents::self_test(&exe) {
-                                Ok(n) => (true, format!("The MCP server answered with {n} tools. Now ask your agent: \"Say hello from Horizon\".")),
+                                Ok(n) => (true, format!("The MCP server answered with {n} tools. Now ask your agent: \"Say hello from Minecraft: Rust Edition\".")),
                                 Err(e) => (false, format!("The MCP server did not answer: {e}")),
                             }
                         });
@@ -214,7 +214,7 @@ fn run_add(program: &str, args: &[String]) -> (bool, String) {
         Ok(out) if out.status.success() => (
             true,
             format!(
-                "Added. Restart {program} if it is open, then ask it: \"Say hello from Horizon\"."
+                "Added. Restart {program} if it is open, then ask it: \"Say hello from Minecraft: Rust Edition\"."
             ),
         ),
         Ok(out) => (

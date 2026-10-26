@@ -37,7 +37,7 @@ pub const CONSENT_VERSION: u32 = 2;
 /// The ingest server (`crates/horizon-telemetry-server`, on Railway). `HORIZON_TELEMETRY_URL`
 /// overrides it (a local server); `HORIZON_TELEMETRY_URL=off` sends nothing at all, no ping
 /// either (tests and automated runs). What is sent still depends on the player's switches.
-pub const DEFAULT_ENDPOINT: &str = "https://telemetry.playhorizon.dev";
+pub const DEFAULT_ENDPOINT: &str = "";
 
 /// Where items are sent, if anywhere.
 pub fn endpoint() -> Option<String> {
@@ -48,7 +48,7 @@ fn resolve(var: Option<&str>) -> Option<String> {
     match var.map(str::trim) {
         Some("off" | "none" | "0") => None,
         Some(url) if !url.is_empty() => Some(url.trim_end_matches('/').to_owned()),
-        _ => Some(DEFAULT_ENDPOINT.to_owned()),
+        _ => None,
     }
 }
 
@@ -112,14 +112,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_endpoint_defaults_to_the_server_and_can_be_moved_or_turned_off() {
-        assert_eq!(resolve(None).as_deref(), Some(DEFAULT_ENDPOINT));
-        assert_eq!(resolve(Some(" ")).as_deref(), Some(DEFAULT_ENDPOINT));
+    fn uploads_are_off_until_an_endpoint_is_explicitly_configured() {
+        assert_eq!(resolve(None), None);
+        assert_eq!(resolve(Some(" ")), None);
         assert_eq!(
             resolve(Some("http://127.0.0.1:8080/")).as_deref(),
             Some("http://127.0.0.1:8080")
         );
         assert_eq!(resolve(Some("off")), None);
-        assert!(DEFAULT_ENDPOINT.starts_with("https://") && !DEFAULT_ENDPOINT.ends_with('/'));
+        assert!(DEFAULT_ENDPOINT.is_empty());
     }
 }

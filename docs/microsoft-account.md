@@ -1,3 +1,21 @@
+# Existing launcher sessions in this fork
+
+Use **Settings → Existing Minecraft account → Use Prism account** to read the active Prism
+Minecraft session. A custom accounts.json can be selected with
+`horizon-launcher account import /path/to/accounts.json`.
+
+The import takes only the Minecraft token, expiry and profile ID from that file. It checks ownership and the
+profile through Minecraft's HTTPS service, then keeps its own copy in this app's keychain entry
+(or memory if no keychain is available). It never imports Microsoft refresh tokens or app IDs.
+Before each launch it reads the same profile from the source again. Expired sessions require a
+fresh online launch through Prism. It does not edit the source launcher or start Java gameplay.
+The official launcher's private account storage is not supported.
+
+This path avoids registering a new app for an already valid Minecraft session. Direct Microsoft
+sign-in still needs an approved app ID. Live online-server compatibility is not yet verified.
+
+---
+
 # Microsoft account sign-in and online-mode play
 
 Horizon signs players in with their Microsoft account in the launcher and joins online-mode

@@ -6,17 +6,17 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
 	<key>CFBundleDisplayName</key>
-	<string>Horizon</string>
+	<string>Minecraft: Rust Edition</string>
 	<key>CFBundleExecutable</key>
 	<string>horizon-launcher</string>
 	<key>CFBundleIconFile</key>
 	<string>horizon</string>
 	<key>CFBundleIdentifier</key>
-	<string>dev.horizon.launcher</string>
+	<string>io.github.calebtrueman.minecraft-rust-edition.launcher</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
-	<string>Horizon</string>
+	<string>Minecraft: Rust Edition</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>

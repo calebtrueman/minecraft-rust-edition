@@ -47,7 +47,13 @@ fn kind_id(prefix: &str, kind: DataKind) -> &'static str {
 
 /// Where a switch would be: the ping has none.
 fn always_on(t: &Theme) -> Div {
-    caps("Always on").flex_none().text_color(t.muted)
+    caps(if horizon_telemetry::endpoint().is_some() {
+        "Configured"
+    } else {
+        "Off"
+    })
+    .flex_none()
+    .text_color(t.muted)
 }
 
 /// The "I'm playing" ping on the first-run question, laid out as the switches' rows.
@@ -114,7 +120,9 @@ impl Launcher {
     /// Whether the question covers the window: not answered for this consent version, and the
     /// opening is over.
     pub(crate) fn asking_consent(&self) -> bool {
-        self.opening.is_none() && self.collection.consent.needs_asking()
+        horizon_telemetry::endpoint().is_some()
+            && self.opening.is_none()
+            && self.collection.consent.needs_asking()
     }
 
     fn answer_consent(&mut self, choices: Choices) {
@@ -185,10 +193,10 @@ impl Launcher {
             .child(
                 text(theme::HEADING)
                     .text_color(t.ink)
-                    .child("Help make Horizon faster and steadier?"),
+                    .child("Help make Minecraft: Rust Edition faster and steadier?"),
             )
             .child(text(theme::UI).text_color(t.muted).child(
-                "Horizon can send a few things to its developers. Each switch is off until you turn it on, and Settings can change it any time.",
+                "Minecraft: Rust Edition can send a few things to its developers. Each switch is off until you turn it on, and Settings can change it any time.",
             ))
             .child(
                 div()

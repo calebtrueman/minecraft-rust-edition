@@ -50,7 +50,7 @@ pub fn data_dir() -> PathBuf {
 pub fn game_home() -> PathBuf {
     match std::env::var_os("HORIZON_HOME").filter(|h| !h.is_empty()) {
         Some(h) => PathBuf::from(h),
-        None => data_dir().join("horizon"),
+        None => data_dir().join("minecraft-rust-edition"),
     }
 }
 

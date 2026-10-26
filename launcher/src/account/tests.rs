@@ -243,6 +243,7 @@ fn refresh_only_when_the_token_runs_out() {
         cape: None,
     };
     let good = Secrets {
+        imported_from: None,
         refresh_token: "ms-refresh-1".into(),
         minecraft_token: "old".into(),
         minecraft_expires_at: now() + 7200,
@@ -265,6 +266,7 @@ fn refresh_only_when_the_token_runs_out() {
     );
     assert!(renewed_account.skin.is_some());
     let revoked = Secrets {
+        imported_from: None,
         refresh_token: "revoked".into(),
         minecraft_expires_at: 0,
         ..kept
@@ -278,6 +280,7 @@ fn refresh_only_when_the_token_runs_out() {
 #[test]
 fn ownership_is_asked_again_with_the_saved_token() {
     let secrets = |token: &str| Secrets {
+        imported_from: None,
         refresh_token: "ms-refresh-1".into(),
         minecraft_token: token.into(),
         minecraft_expires_at: now() + 7200,
@@ -349,6 +352,7 @@ fn accounts_keep_secrets_in_the_store_only() {
         cape: None,
     };
     let secrets = Secrets {
+        imported_from: None,
         refresh_token: "r".into(),
         minecraft_token: "mc-secret".into(),
         minecraft_expires_at: 1,
@@ -382,6 +386,7 @@ fn session_files_are_private_and_complete() {
         cape: None,
     };
     let secrets = Secrets {
+        imported_from: None,
         refresh_token: "r".into(),
         minecraft_token: "mc-token".into(),
         minecraft_expires_at: 1,
@@ -422,4 +427,41 @@ fn client_id_is_configuration() {
         Some("00000000-1111-2222-3333-444444444444")
     );
     std::env::remove_var("HORIZON_MSA_CLIENT_ID");
+}
+
+#[test]
+fn imported_sessions_are_checked_and_reread_without_microsoft_refresh() {
+    let path = std::env::temp_dir().join(format!("mcre-import-{}.json", std::process::id()));
+    let data = json!({"accounts": [{"active": true, "profile": {"id": UUID},
+        "msa": {"refresh_token": "never-copy"},
+        "ygg": {"token": "mc-token", "exp": now() + 7200}}]});
+    std::fs::write(&path, data.to_string()).unwrap();
+    let (m, ep) = mock(|_| {});
+    let (account, secrets) = existing::read_session(&ep, &path, None).unwrap();
+    assert_eq!(account.uuid, UUID);
+    assert!(secrets.refresh_token.is_empty());
+    let (again, _) = fresh(&ep, "", &account, secrets.clone()).unwrap();
+    assert_eq!(again, account);
+    assert_eq!(m.lock().unwrap().log.len(), 4);
+    assert!(m
+        .lock()
+        .unwrap()
+        .log
+        .iter()
+        .all(|(method, _, _)| method == "GET"));
+    m.lock().unwrap().owns_game = false;
+    assert!(fresh(&ep, "", &account, secrets.clone()).is_err());
+    m.lock().unwrap().owns_game = true;
+    let mut changed = data.clone();
+    changed["accounts"][0]["profile"]["id"] = json!("00000000000000000000000000000000");
+    std::fs::write(&path, changed.to_string()).unwrap();
+    assert!(existing::read_session(&ep, &path, None).is_err());
+    assert!(fresh(&ep, "", &account, secrets.clone()).is_err());
+    changed = data;
+    changed["accounts"][0]["ygg"]["exp"] = json!(0);
+    std::fs::write(&path, changed.to_string()).unwrap();
+    assert!(fresh(&ep, "", &account, secrets)
+        .unwrap_err()
+        .contains("expired"));
+    std::fs::remove_file(path).unwrap();
 }

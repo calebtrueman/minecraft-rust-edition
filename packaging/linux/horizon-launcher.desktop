@@ -1,8 +1,8 @@
 [Desktop Entry]
 Type=Application
-Name=Horizon
+Name=Minecraft: Rust Edition
 GenericName=Game launcher
-Comment=Install, prepare and play Horizon, Minecraft: Java Edition 26.3 rewritten in Rust
+Comment=Install, prepare and play Minecraft: Rust Edition, Minecraft: Java Edition 26.3 rewritten in Rust
 Exec=horizon-launcher
 Icon=horizon
 Terminal=false

@@ -79,6 +79,11 @@ enum AccountCmd {
     List,
     /// Sign in with a Microsoft account in your browser (device code)
     SignIn,
+    /// Use the active Minecraft session from Prism Launcher; never copies Microsoft tokens
+    Import {
+        /// Optional path to Prism Launcher accounts.json
+        path: Option<PathBuf>,
+    },
     /// Sign out: the account's tokens leave the keychain
     SignOut {
         /// Its name or UUID
@@ -864,6 +869,17 @@ fn account_command(action: AccountCmd, as_json: bool) -> Result<(), String> {
                 if accounts.selected().is_none() {
                     println!("Playing offline (`account select NAME` to play as one).");
                 }
+            }
+        }
+        AccountCmd::Import { path } => {
+            let ep = account::Endpoints::live();
+            let imported = match path {
+                Some(path) => account::import_from(&ep, &path)?,
+                None => account::import_existing(&ep)?,
+            };
+            println!("Using {} from your existing launcher.", imported.name);
+            if !account::store().persistent() {
+                eprintln!("{}", account::NO_KEYCHAIN);
             }
         }
         AccountCmd::SignIn => {

@@ -6,6 +6,9 @@
 //!
 //! The Azure app (client ID) is Horizon's own and is configuration: `HORIZON_MSA_CLIENT_ID` at
 //! build time, or at run time to override it. Without one, sign-in says it is not configured.
+mod existing;
+pub use existing::{import_existing, import_from};
+
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -13,11 +16,10 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// The keychain service name every secret is stored under.
-pub const SERVICE: &str = "dev.playhorizon.launcher";
+pub const SERVICE: &str = "io.github.calebtrueman.minecraft-rust-edition";
 const SCOPE: &str = "XboxLive.signin offline_access";
 pub const NOT_CONFIGURED: &str =
-    "Microsoft sign-in is coming soon. Until then the game plays offline: single player, \
-     LAN and servers in offline mode work.";
+    "Use an existing Prism Launcher session, or configure an approved Microsoft app ID for direct sign-in. Single player and offline servers work without an account.";
 const SIGN_IN_AGAIN: &str = "Your Microsoft sign-in expired. Sign in again.";
 /// The Minecraft token is renewed when it has less than this left.
 const RENEW_BEFORE: u64 = 3600;
@@ -405,6 +407,11 @@ fn profile(ep: &Endpoints, token: &str) -> Result<Account, String> {
     if status == 404 {
         return Err("This account has no Minecraft profile yet. Create one at minecraft.net, then sign in again.".into());
     }
+    if status != 200 {
+        return Err(
+            "The Minecraft session was refused. Sign in again in the launcher that owns it.".into(),
+        );
+    }
     let (Some(uuid), Some(name)) = (str_field(&v, "id"), str_field(&v, "name")) else {
         return Err("Could not read the Minecraft profile.".into());
     };
@@ -442,6 +449,8 @@ pub fn owns_minecraft(ep: &Endpoints, secrets: &Secrets) -> Result<bool, String>
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Secrets {
     refresh_token: String,
+    #[serde(default)]
+    imported_from: Option<PathBuf>,
     minecraft_token: String,
     minecraft_expires_at: u64,
     #[serde(default)]
@@ -464,6 +473,7 @@ pub fn finish_sign_in(ep: &Endpoints, ms: MsTokens) -> Result<(Account, Secrets)
         account,
         Secrets {
             refresh_token: ms.refresh,
+            imported_from: None,
             minecraft_token: mc.token,
             minecraft_expires_at: mc.expires_at,
             xuid: mc.xuid,
@@ -479,6 +489,9 @@ pub fn fresh(
     account: &Account,
     secrets: Secrets,
 ) -> Result<(Account, Secrets), String> {
+    if let Some(path) = &secrets.imported_from {
+        return existing::read_session(ep, path, Some(&account.uuid));
+    }
     if secrets.minecraft_expires_at > now() + RENEW_BEFORE {
         return Ok((account.clone(), secrets));
     }
@@ -716,7 +729,11 @@ pub fn session_for_launch(
                 account.name
             )
         })?;
-    let client_id = client_id().ok_or(NOT_CONFIGURED)?;
+    let client_id = if secrets.imported_from.is_some() {
+        String::new()
+    } else {
+        client_id().ok_or(NOT_CONFIGURED)?
+    };
     let before = secrets.minecraft_token.clone();
     let (renewed, secrets) = fresh(ep, &client_id, &account, secrets)?;
     if renewed != account || secrets.minecraft_token != before {
@@ -809,6 +826,20 @@ impl SignIn {
         });
         Self { state, cancel }
     }
+    /// Import only after the player presses the existing-session button.
+    pub fn import_existing() -> Self {
+        let state = std::sync::Arc::new(Mutex::new(SignInState::Starting));
+        let thread_state = state.clone();
+        std::thread::spawn(move || {
+            let result = import_existing(&Endpoints::live());
+            *thread_state.lock().unwrap() = SignInState::Done(result);
+        });
+        Self {
+            state,
+            cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+
     pub fn state(&self) -> SignInState {
         self.state.lock().unwrap().clone()
     }

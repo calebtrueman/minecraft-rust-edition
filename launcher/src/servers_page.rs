@@ -749,7 +749,9 @@ impl Launcher {
             Fix::Prepare => match self.selected().cloned() {
                 Some(tag) if backend::is_prepared(&tag) => {
                     self.server_job("Copying the game files", move |log| {
-                        log(format!("Copying the game files prepared for Horizon {tag}"));
+                        log(format!(
+                            "Copying the game files prepared for Minecraft: Rust Edition {tag}"
+                        ));
                         servers::set_up(&tag)
                             .map(|_| "The game files are ready. Press Start again.".to_string())
                             .map_err(Problem::plain)
@@ -1167,15 +1169,12 @@ impl Launcher {
         {
             page = page.child(self.problem_notice(p, cx));
         }
-        let partner = super::partner::banner("partner-servers", 600., &t);
         if self.servers.list.is_empty() {
-            return page
-                .child(centered(
-                    "No server yet. Create one: it takes a few seconds, and with the defaults \
+            return page.child(centered(
+                "No server yet. Create one: it takes a few seconds, and with the defaults \
                      (tick the EULA, press Create) you get a friends-only survival world.",
-                    &t,
-                ))
-                .child(partner);
+                &t,
+            ));
         }
         let mut list = div().flex().flex_col().border_t_1().border_color(t.rule);
         for (i, e) in self.servers.list.clone().into_iter().enumerate() {
@@ -1216,7 +1215,7 @@ impl Launcher {
                 &t,
             ));
         }
-        page.child(list).child(partner)
+        page.child(list)
     }
 
     fn add_server_folder(&mut self, cx: &mut Context<Self>) {
@@ -1253,8 +1252,9 @@ impl Launcher {
         std::thread::spawn(move || {
             let result = (|| {
                 if servers::program().is_none() {
-                    let tag =
-                        tag.ok_or_else(|| Problem::plain("Install a Horizon version first."))?;
+                    let tag = tag.ok_or_else(|| {
+                        Problem::plain("Install a Minecraft: Rust Edition version first.")
+                    })?;
                     servers::set_up(&tag).map_err(Problem::plain)?;
                 }
                 if !dir.join("server.toml").is_file() {
@@ -2139,7 +2139,7 @@ impl Launcher {
         if self.servers.config.is_none() {
             return div().child(centered(
                 if self.older_horizon() {
-                    "This server's Horizon is too old to show its settings here. Update it on \
+                    "This server's Minecraft: Rust Edition is too old to show its settings here. Update it on \
                      the Backups tab, then they appear."
                 } else {
                     "Reading the settings…"
@@ -2343,12 +2343,12 @@ impl Launcher {
         });
         let about = match (&available, &check, &status.update_last) {
             (Some(tag), _, _) => format!(
-                "Update available: Horizon {tag} (this server runs {release}). Updating backs up \
+                "Update available: Minecraft: Rust Edition {tag} (this server runs {release}). Updating backs up \
                  the world first, and goes back by itself if the new version doesn't start."
             ),
-            (None, Some(_), _) => format!("Up to date: Horizon {release}."),
-            (None, None, Some((last, _))) => format!("Horizon {release}. {last}"),
-            (None, None, None) => format!("Horizon {release}."),
+            (None, Some(_), _) => format!("Up to date: Minecraft: Rust Edition {release}."),
+            (None, None, Some((last, _))) => format!("Minecraft: Rust Edition {release}. {last}"),
+            (None, None, None) => format!("Minecraft: Rust Edition {release}."),
         };
         let control = match available {
             Some(tag) => {
@@ -2358,7 +2358,7 @@ impl Launcher {
                         this.servers.update = None;
                         if let Some(dir) = this.servers.open.clone() {
                             let done = format!(
-                                "Updated to Horizon {tag}. The world was backed up first (Backups)."
+                                "Updated to Minecraft: Rust Edition {tag}. The world was backed up first (Backups)."
                             );
                             this.server_job(format!("Updating to {tag}"), move |log| {
                                 servers::run_streamed(&dir, &["update"], log).map(|_| done)
@@ -2402,7 +2402,11 @@ impl Launcher {
             .flex_col()
             .border_t_1()
             .border_color(t.rule)
-            .child(self.setting_row("This server's Horizon", about, control.into_any_element()));
+            .child(self.setting_row(
+                "This server's Minecraft: Rust Edition",
+                about,
+                control.into_any_element(),
+            ));
         if self.servers.setting("updates", "keep").is_some() {
             rows = rows.child(self.setting_row(
                 "Older versions kept",
@@ -2530,7 +2534,7 @@ impl Launcher {
         if self.older_horizon() {
             return tab
                 .child(text(theme::UI).text_color(t.muted).child(
-                    "This server's Horizon is too old to list its backups here: they're in its \
+                    "This server's Minecraft: Rust Edition is too old to list its backups here: they're in its \
                      backups folder. Update it below.",
                 ))
                 .child(self.updates_section(status, cx));
@@ -2758,7 +2762,7 @@ impl Launcher {
                             .child("Check Minecraft accounts"),
                     )
                     .child(text(theme::CAPTION).text_color(t.muted).child(
-                        "Only if every player signs in with Microsoft. Leave it off for Horizon \
+                        "Only if every player signs in with Microsoft. Leave it off for Minecraft: Rust Edition \
                          players without an account: Friends only keeps strangers out.",
                     )),
             );

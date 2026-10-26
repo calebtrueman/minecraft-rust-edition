@@ -341,7 +341,7 @@ fn status(send: &Sender<Event>, text: &str) {
 }
 
 /// Shown when an online-mode server asks a client without an account to authenticate.
-pub const NOT_SIGNED_IN: &str = "This server is in online mode. Sign in with your Microsoft account in the Horizon launcher to join it.";
+pub const NOT_SIGNED_IN: &str = "This server is in online mode. Select your Minecraft account in the Minecraft: Rust Edition launcher to join it.";
 
 /// A translation, or the key itself (Language.getOrDefault).
 fn tr(lang: &Language, key: &str) -> String {

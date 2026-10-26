@@ -25,7 +25,7 @@ const CHECKING: usize = 2;
 /// The sources to pick from; CurseForge is shown beside them as coming soon.
 const SOURCES: [(SourceId, &str); 2] = [
     (SourceId::Modrinth, "Modrinth"),
-    (SourceId::Horizon, "Horizon"),
+    (SourceId::Horizon, "Rust mods"),
 ];
 const PAGE: usize = 20;
 
@@ -635,10 +635,7 @@ impl Launcher {
         }
         let header = page_header(
             "Mods",
-            "Mods and shader packs made for Horizon from its own reviewed registry, and Java \
-             mods, modpacks and resource packs from Modrinth: Horizon ports what a Java mod \
-             carries (blocks, items, recipes, worldgen) and says before you install what runs. Each file is checked \
-             against its source's checksum before it reaches your game folder.",
+            "Rust mods and resource packs. Fabric and other Java mod code does not run in the Rust game. Importing a pack can carry over supported data and assets; it does not preserve all of its mods.",
             &t,
         );
         let this = cx.entity().downgrade();

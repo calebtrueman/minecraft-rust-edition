@@ -1,4 +1,4 @@
-//! Horizon launcher: installs Horizon builds, prepares them from the player's own Minecraft,
+//! Minecraft: Rust Edition launcher: installs Minecraft: Rust Edition builds, prepares them from the player's own Minecraft,
 //! and starts the client or a dedicated server.
 
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
@@ -18,7 +18,6 @@ mod mcp;
 mod modpacks_page;
 mod mods_page;
 mod mods_project;
-mod partner;
 mod perf;
 mod scrollbar;
 mod servers_page;
@@ -138,7 +137,7 @@ struct Launcher {
     checked: Option<Instant>,
     update_error: Option<String>,
     self_update: SelfUpdate,
-    /// The Horizon version being installed as an update, and whether it becomes the selected one.
+    /// The Minecraft: Rust Edition version being installed as an update, and whether it becomes the selected one.
     update_install: Option<(String, bool)>,
     /// The install bar's previous and current fraction, so it moves rather than jumps.
     bar: (f32, f32),
@@ -195,7 +194,7 @@ struct Launcher {
     collection: collection::Collection,
     /// Settings' "Connect an AI agent" (`agents_page`).
     agents: agents_page::AgentsUi,
-    /// How many play Horizon now, while the server answers ("N playing now" on the Play page).
+    /// How many play Minecraft: Rust Edition now, while the server answers ("N playing now" on the Play page).
     playing: Option<u64>,
     tx: Sender<Msg>,
     rx: Receiver<Msg>,
@@ -210,7 +209,7 @@ struct Launcher {
     /// The Modpacks page: the imported packs (read when the page first opens), the one shown,
     /// the report's filter, and the pipeline step running now with its log.
     packs: Vec<horizon_launcher::modpacks::Imported>,
-    /// Modpacks installed from Horizon's registry, each its own profile.
+    /// Modpacks installed from Minecraft: Rust Edition's registry, each its own profile.
     registry_packs: Vec<horizon_launcher::browser::horizon::pack::Installed>,
     packs_loaded: Option<Instant>,
     pack_open: Option<String>,
@@ -427,7 +426,7 @@ impl Launcher {
         });
     }
 
-    /// Installs the Horizon version the last check found, keeping the player's choice of
+    /// Installs the Minecraft: Rust Edition version the last check found, keeping the player's choice of
     /// version unless they were on the newest one.
     fn install_update(&mut self) {
         let Some(release) = self.updates.horizon.clone() else {
@@ -648,7 +647,7 @@ impl Launcher {
                                 .and_then(backend::crash_report_since);
                             if error.is_some() && report.is_none() && self.switched_to_dx12() {
                                 self.client_error = Some(
-                                    "Horizon's Vulkan renderer crashed while starting on this \
+                                    "Minecraft: Rust Edition's Vulkan renderer crashed while starting on this \
                                      graphics card, so the game now uses DirectX 12. Press Play \
                                      to start it again. Video Settings > Graphics API switches \
                                      back."
@@ -721,7 +720,9 @@ impl Launcher {
         for home in homes {
             match backend::switch_to_dx12(&home) {
                 Ok(changed) => switched |= changed,
-                Err(e) => eprintln!("Horizon launcher: could not switch to DirectX 12: {e}"),
+                Err(e) => eprintln!(
+                    "Minecraft: Rust Edition launcher: could not switch to DirectX 12: {e}"
+                ),
             }
         }
         switched
@@ -988,34 +989,29 @@ fn version_tag(tag: &str) -> Div {
         .child(tag.trim_start_matches('v').to_string())
 }
 
-/// Horizon's mark: two stems, their reflection below, and the horizon across in the accent.
+/// A simple grass-block mark, drawn here without game assets.
 fn mark(size: f32, t: &Theme) -> Div {
-    let u = size / 16.;
-    let stem = |x: f32, y: f32, color: Hsla| {
-        div()
-            .absolute()
-            .left(px(x * u))
-            .top(px(y * u))
-            .w(px(2. * u))
-            .h(px(4. * u))
-            .bg(color)
-    };
     div()
         .relative()
         .flex_none()
         .size(px(size))
-        .child(stem(4., 3., t.ink))
-        .child(stem(10., 3., t.ink))
-        .child(stem(4., 8., t.ink.opacity(0.36)))
-        .child(stem(10., 8., t.ink.opacity(0.36)))
+        .bg(t.ink_soft)
         .child(
             div()
                 .absolute()
-                .left(px(u))
-                .top(px(7. * u))
-                .w(px(14. * u))
-                .h(px(u))
-                .bg(t.accent),
+                .top_0()
+                .left_0()
+                .w_full()
+                .h(px(size * 0.3))
+                .bg(t.success),
+        )
+        .child(
+            div()
+                .absolute()
+                .left(px(size * 0.18))
+                .top(px(size * 0.5))
+                .size(px(size * 0.18))
+                .bg(t.page),
         )
 }
 
@@ -1538,7 +1534,7 @@ impl Launcher {
             )
     }
 
-    /// The sidebar: Horizon and the imported modpacks, the player's servers, then the
+    /// The sidebar: Minecraft: Rust Edition and the imported modpacks, the player's servers, then the
     /// launcher's own update, the community links and its version.
     fn sidebar(&mut self, cx: &mut Context<Self>) -> Stateful<Div> {
         let t = self.theme;
@@ -1594,7 +1590,7 @@ impl Launcher {
             .flex_col()
             .gap(px(4.))
             .child(heading("INSTANCES").child(add));
-        // Horizon itself, with a grass block from the player's own prepared files.
+        // Minecraft: Rust Edition itself, with a grass block from the player's own prepared files.
         let tag = self.selected().cloned();
         let prepared = tag.as_deref().is_some_and(backend::is_prepared);
         let grass = self.vanilla_icon();
@@ -1608,7 +1604,7 @@ impl Launcher {
                         .justify_center()
                         .size(px(44.))
                         .child(gpui::img(g).size(px(40.))),
-                    None => blocks::slot(None, "Horizon", 44., &t),
+                    None => blocks::slot(None, "Minecraft: Rust Edition", 44., &t),
                 })
                 .child(dot(if prepared { t.success } else { t.warn }))
                 .child(
@@ -1616,11 +1612,11 @@ impl Launcher {
                         .flex()
                         .flex_col()
                         .min_w_0()
-                        .child(title("Horizon".into()))
+                        .child(title("Minecraft".into()))
                         .child(sub(if tag.is_none() {
                             "No version installed"
                         } else if prepared {
-                            "Vanilla · ready"
+                            "Rust Edition · ready"
                         } else {
                             "Needs preparing"
                         }
@@ -2056,7 +2052,7 @@ impl Launcher {
             }
         }
 
-        // The banner: Horizon's landscape (`art.rs`) under a veil of the page colour, the hero and
+        // The banner: Minecraft: Rust Edition's landscape (`art.rs`) under a veil of the page colour, the hero and
         // the Play row over it. It reaches the content's edges and the top bar.
         let (scene, scene_width) = self.art.scene(t.dark, self.scale, banner_width);
         let veil = |angle: f32, from: f32, to: f32, at: f32| {
@@ -2132,10 +2128,10 @@ impl Launcher {
             page = page.child(self.crash_notice(crash, cx));
         }
         // Below everything the player needs to start, so it never moves Play.
-        page.child(partner::banner("partner-home", 560., &t))
+        page
     }
 
-    /// "Horizon crashed": the report and the logs, and where to report it.
+    /// "Minecraft: Rust Edition crashed": the report and the logs, and where to report it.
     fn crash_notice(&self, crash: Crash, cx: &mut Context<Self>) -> Div {
         let t = self.theme;
         let mut actions = div().flex().flex_wrap().gap(px(8.)).mt(px(8.));
@@ -2211,7 +2207,7 @@ impl Launcher {
             .child(
                 text(theme::HEADING)
                     .text_color(t.ink)
-                    .child("Horizon crashed"),
+                    .child("Minecraft: Rust Edition crashed"),
             );
         if !crash.summary.is_empty() {
             body = body.child(div().text_color(t.ink_soft).child(crash.summary));
@@ -2258,7 +2254,7 @@ impl Launcher {
                 .and_then(|r| backend::notes_summary(&r.body)),
             _ => None,
         };
-        let title = "Horizon";
+        let title = "Minecraft: Rust Edition";
         // Never squeezed by the rows below: the ping notice can make it tall.
         let mut hero = div()
             .flex()
@@ -2351,7 +2347,10 @@ impl Launcher {
         }
         // Players who answered the first-run question before the ping existed read about it
         // once here.
-        if !self.settings.ping_notice_seen && !self.collection.consent.needs_asking() {
+        if horizon_telemetry::endpoint().is_some()
+            && !self.settings.ping_notice_seen
+            && !self.collection.consent.needs_asking()
+        {
             hero = hero.child(
                 plate(&t)
                     .flex()
@@ -2555,7 +2554,7 @@ impl Launcher {
                     .child(group("AI", "terminal"))
                     .child(self.no_ai_row(n + 6, cx))
                     .child(group("About", "info-box"))
-                    .child(index_row(n + 7, "Horizon", Some(plain(&horizon)), horizon_action, &t))
+                    .child(index_row(n + 7, "Minecraft: Rust Edition", Some(plain(&horizon)), horizon_action, &t))
                     .child(index_row(
                         n + 8,
                         "Launcher",
@@ -2593,7 +2592,7 @@ impl Launcher {
                             n + 11,
                             "Applications menu",
                             Some(plain(if self.settings.desktop_entry() {
-                                "Horizon and its icon are in your desktop's menu."
+                                "Minecraft: Rust Edition and its icon are in your desktop's menu."
                             } else {
                                 "Not in your desktop's menu."
                             })),
@@ -2834,7 +2833,7 @@ impl Launcher {
             Some(SignInState::Starting | SignInState::Code(_))
         );
         let detail = match &self.sign_in_state {
-            _ if !configured => div().child(account::NOT_CONFIGURED),
+            _ if !configured && self.accounts.selected().is_none() && self.sign_in_state.is_none() => div().child(account::NOT_CONFIGURED),
             Some(SignInState::Starting) => div().child("Asking Microsoft…"),
             Some(SignInState::Code(code)) => div()
                 .flex()
@@ -2868,8 +2867,19 @@ impl Launcher {
                 .child(div().child(account::NO_KEYCHAIN))
         };
         let action = if !configured {
-            // No client ID in this build: the button says what's coming and does nothing.
-            Some(button("sign-in", "Coming soon", Kind::Ghost, &t).into_any_element())
+            if busy {
+                None
+            } else {
+                Some(
+                    button("import-session", "Use Prism account", Kind::Secondary, &t)
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                            this.sign_in = Some(SignIn::import_existing());
+                            this.sign_in_state = Some(SignInState::Starting);
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                )
+            }
         } else if let Some(SignInState::Code(code)) = &self.sign_in_state {
             let (uri, user_code) = (code.verification_uri.clone(), code.user_code.clone());
             Some(
@@ -2917,7 +2927,7 @@ impl Launcher {
         };
         n += 1;
         let title = if !configured {
-            "Microsoft account (coming soon)"
+            "Existing Minecraft account"
         } else if self.accounts.accounts.is_empty() {
             "Microsoft account"
         } else {
@@ -3266,7 +3276,7 @@ impl Launcher {
                                 .child("Support the work below"),
                         )
                         .child(text(theme::UI).text_color(t.muted).child(
-                            "Horizon is built in the open. Sponsors fund the next release.",
+                            "Minecraft: Rust Edition is built in the open. Sponsors fund the next release.",
                         )),
                 )
                 .child(
@@ -3660,8 +3670,11 @@ fn key_bindings() -> Vec<KeyBinding> {
 fn menus() -> Vec<Menu> {
     vec![
         Menu {
-            name: "Horizon Launcher".into(),
-            items: vec![MenuItem::action("Quit Horizon Launcher", Quit)],
+            name: "Minecraft: Rust Edition Launcher".into(),
+            items: vec![MenuItem::action(
+                "Quit Minecraft: Rust Edition Launcher",
+                Quit,
+            )],
         },
         Menu {
             name: "Window".into(),
@@ -3758,10 +3771,10 @@ mod tests {
     #[test]
     fn the_app_menu_has_quit() {
         let menus = super::menus();
-        assert_eq!(menus[0].name, "Horizon Launcher");
+        assert_eq!(menus[0].name, "Minecraft: Rust Edition Launcher");
         assert!(matches!(
             &menus[0].items[0],
-            gpui::MenuItem::Action { name, .. } if name == "Quit Horizon Launcher"
+            gpui::MenuItem::Action { name, .. } if name == "Quit Minecraft: Rust Edition Launcher"
         ));
     }
 

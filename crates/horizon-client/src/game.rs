@@ -11541,7 +11541,7 @@ impl ApplicationHandler for Game<'_> {
         let size = self.options.window_size.map(f64::from);
         self.fullscreen = horizon_client::window::FullscreenState::new(fullscreen);
         let attributes = Window::default_attributes()
-            .with_title("Horizon")
+            .with_title("Minecraft: Rust Edition")
             .with_window_icon(horizon_client::window::icon());
         // Wayland names the window by its app id, which the horizon.desktop entry matches.
         #[cfg(target_os = "linux")]
@@ -13825,7 +13825,7 @@ impl Loading {
             .map(f64::from);
         self.fullscreen = horizon_client::window::FullscreenState::new(fullscreen);
         let attributes = Window::default_attributes()
-            .with_title("Horizon")
+            .with_title("Minecraft: Rust Edition")
             .with_window_icon(horizon_client::window::icon());
         // Wayland names the window by its app id, which the horizon.desktop entry matches.
         #[cfg(target_os = "linux")]
