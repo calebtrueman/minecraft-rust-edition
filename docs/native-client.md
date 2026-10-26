@@ -210,13 +210,16 @@ presentation, so `bench` reports what is on screen.
 
 ### Discord Rich Presence
 
-While Discord runs on the same computer, the player's Discord profile shows
-"Playing Horizon" and what they are doing: "In the menus", "Singleplayer",
+While Discord runs on the same computer, the player's Discord profile can show
+"Playing Minecraft: Rust Edition" and what they are doing: "In the menus", "Singleplayer",
 "Multiplayer" or "Hosting a world" (with the party size, of 8), the dimension
 ("In the Nether") and the time since they entered the world. It never shows a
-world's name or a server's address. Horizon Settings has the switch
-(**Discord Rich Presence**, on by default; `discordPresence` in
-`horizon-extras.txt`), and `HORIZON_NO_DISCORD=1` turns it off for one run.
+world's name or a server's address. The setting is on by default, but presence
+starts only when `HORIZON_DISCORD_APP_ID` is set to an app ID owned by this
+fork. The app needs a large image named `rust_edition`. With no app ID, presence
+is off. The game settings have the switch (**Discord Rich Presence**;
+`discordPresence` in `horizon-extras.txt`), and `HORIZON_NO_DISCORD=1` turns it
+off for one run.
 
 `crates/horizon-client/src/discord_presence.rs` speaks Discord's local IPC
 itself (the `discord-ipc-N` socket or named pipe, no SDK) from a thread of its
@@ -225,10 +228,10 @@ while Discord isn't running and stays within Discord's 5 updates per 20 s.
 Dedicated servers never start it, and automated runs (offscreen, benchmarks)
 only talk to a fake Discord: `lab.game_env` sets `HORIZON_NO_DISCORD=1`, and
 `tools/discord_presence_e2e.py` points games at a fake server with
-`HORIZON_DISCORD_IPC_DIR` (title, world, Nether and quit on both single-player
-paths; a LAN host and guest; the switch; a Discord started after the game).
-`DISCORD_APP_ID` is Discord's "Horizon" application, whose `horizon` image is
-the large one; there are no game-mode images yet.
+`HORIZON_DISCORD_IPC_DIR` and the explicit test ID `123456789012345678` (title,
+world, Nether and quit on both single-player paths; no app ID; a LAN host and
+guest; the switch; a fake Discord started after the game). These checks use
+only the fake server in a scratch folder; they never contact Discord.
 
 ### Play on another of your machines
 

@@ -1,10 +1,8 @@
-//! Discord Rich Presence: "Playing Horizon" on the player's Discord profile, with what they are
-//! doing (docs/native-client.md). A thread of its own talks to the Discord app on this computer
-//! through its local IPC socket (Discord's RPC docs: `discord-ipc-N`, frames of opcode u32 LE +
-//! length u32 LE + JSON). The game only calls [`set`] each frame: a change wakes the thread,
-//! which connects when Discord runs, retries every 15 s when it doesn't, keeps under Discord's
-//! update limit and clears the activity on quit. Nothing is sent with the setting off,
-//! or with `HORIZON_NO_DISCORD=1`.
+//! Discord Rich Presence puts the game and current status on the player's profile
+//! (docs/native-client.md). A thread talks to Discord through its local `discord-ipc-N` socket.
+//! The game only updates status when it changes. The thread retries every 15 s, keeps under
+//! Discord's update limit and clears the activity on quit. It starts only with a fork-owned app ID,
+//! and sends nothing with the setting off or `HORIZON_NO_DISCORD=1`.
 use std::collections::VecDeque;
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
@@ -16,14 +14,15 @@ use serde_json::{Value, json};
 
 use crate::command::args::GameMode;
 
-/// The "Horizon" application on Discord's developer portal (public: it names the game). Its
-/// Rich Presence assets: `horizon`, the logo.
-pub const DISCORD_APP_ID: &str = "1563857609738690560";
+/// A fork must provide its own Discord application ID before presence can start.
+const APP_ID_ENV: &str = "HORIZON_DISCORD_APP_ID";
 /// Whether the application has the game-mode images (`survival`, `creative`, `adventure`,
-/// `spectator`) beside the logo; it doesn't yet.
+/// `spectator`) beside its large image; it doesn't yet.
 const MODE_IMAGES: bool = false;
 /// Points the game at a test's fake Discord (a folder holding `discord-ipc-0`).
 const IPC_DIR_ENV: &str = "HORIZON_DISCORD_IPC_DIR";
+const LARGE_IMAGE: &str = "rust_edition";
+const LARGE_IMAGE_TEXT: &str = "Minecraft: Rust Edition";
 
 /// Discord drops activity updates beyond 5 in 20 seconds.
 const BURST: usize = 5;
@@ -112,6 +111,9 @@ static THREAD: OnceLock<Thread> = OnceLock::new();
 /// Starts the presence thread, once: when the game starts, never for a dedicated server.
 /// `automated` runs (offscreen, benchmarks) only talk to a test's fake Discord.
 pub fn start(enabled: bool, automated: bool) {
+    let Some(app_id) = configured_app_id(std::env::var(APP_ID_ENV).ok()) else {
+        return;
+    };
     let fake_discord = std::env::var_os(IPC_DIR_ENV).is_some();
     if THREAD.get().is_some()
         || std::env::var_os("HORIZON_NO_DISCORD").is_some_and(|v| v != "0")
@@ -124,13 +126,17 @@ pub fn start(enabled: bool, automated: bool) {
     }
     match std::thread::Builder::new()
         .name("Discord presence".into())
-        .spawn(run)
+        .spawn(move || run(app_id))
     {
         Ok(handle) => {
             let _ = THREAD.set(handle.thread().clone());
         }
-        Err(e) => log::warn!("Horizon: no Discord presence: {e}"),
+        Err(e) => log::warn!("Minecraft: Rust Edition: no Discord presence: {e}"),
     }
+}
+
+fn configured_app_id(value: Option<String>) -> Option<String> {
+    value.filter(|id| !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit()))
 }
 
 /// What the player does now; only a change wakes the thread. Free without [`start`].
@@ -164,7 +170,7 @@ fn unix_now() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
-fn run() {
+fn run(app_id: String) {
     let mut client: Option<Client> = None;
     let mut sent: Option<(Wanted, Instant)> = None;
     let mut last_try: Option<Instant> = None;
@@ -195,7 +201,7 @@ fn run() {
                 continue;
             }
             last_try = Some(now);
-            client = Client::connect();
+            client = Client::connect(&app_id);
             if client.is_none() {
                 continue;
             }
@@ -216,7 +222,7 @@ fn run() {
         match c.set_activity(activity(wanted.status, wanted.since)) {
             Ok(()) => sent = Some((wanted, now)),
             Err(e) => {
-                log::info!("Horizon: Discord presence disconnected ({e})");
+                log::info!("Minecraft: Rust Edition: Discord presence disconnected ({e})");
                 client = None;
                 sent = None;
             }
@@ -226,7 +232,7 @@ fn run() {
 
 /// The activity Discord shows for `status`; `None` clears it.
 fn activity(status: Status, since: Option<u64>) -> Option<Value> {
-    let mut assets = json!({"large_image": "horizon", "large_text": "Horizon"});
+    let mut assets = json!({"large_image": LARGE_IMAGE, "large_text": LARGE_IMAGE_TEXT});
     let (details, state, party) = match status {
         Status::Off => return None,
         Status::Menus => ("In the menus", None, None),
@@ -268,7 +274,7 @@ fn activity(status: Status, since: Option<u64>) -> Option<Value> {
     if let Some(players) = party {
         let max = crate::lan::MAX_PLAYERS;
         a["party"] = json!({
-            "id": format!("horizon-{}", std::process::id()),
+            "id": format!("rust-edition-{}", std::process::id()),
             "size": [players.clamp(1, max), max],
         });
     }
@@ -330,26 +336,29 @@ struct Client {
 }
 impl Client {
     /// The first Discord socket that answers the handshake with READY.
-    fn connect() -> Option<Self> {
+    fn connect(app_id: &str) -> Option<Self> {
         sockets().into_iter().find_map(|path| {
             let mut client = Client {
                 pipe: open(&path).ok()?,
                 nonce: 0,
             };
-            match client.handshake() {
+            match client.handshake(app_id) {
                 Ok(()) => {
-                    log::info!("Horizon: connected to Discord for Rich Presence");
+                    log::info!("Minecraft: Rust Edition: connected to Discord for Rich Presence");
                     Some(client)
                 }
                 Err(e) => {
-                    log::debug!("Horizon: Discord at {} refused: {e}", path.display());
+                    log::debug!(
+                        "Minecraft: Rust Edition: Discord at {} refused: {e}",
+                        path.display()
+                    );
                     None
                 }
             }
         })
     }
-    fn handshake(&mut self) -> io::Result<()> {
-        let hello = json!({"v": 1, "client_id": DISCORD_APP_ID});
+    fn handshake(&mut self, app_id: &str) -> io::Result<()> {
+        let hello = json!({"v": 1, "client_id": app_id});
         self.pipe.write_all(&encode(HANDSHAKE, &hello))?;
         self.reply(|frame| frame["evt"] == "READY")
     }
@@ -370,7 +379,10 @@ impl Client {
             match read_frame(&mut self.pipe)? {
                 (FRAME, frame) if ours(&frame) => {
                     if frame["evt"] == "ERROR" {
-                        log::info!("Horizon: Discord presence: {}", frame["data"]["message"]);
+                        log::info!(
+                            "Minecraft: Rust Edition: Discord presence: {}",
+                            frame["data"]["message"]
+                        );
                     }
                     return Ok(());
                 }
@@ -513,12 +525,24 @@ mod tests {
     }
 
     #[test]
+    fn presence_needs_an_explicit_numeric_app_id() {
+        assert_eq!(configured_app_id(None), None);
+        assert_eq!(configured_app_id(Some(String::new())), None);
+        assert_eq!(configured_app_id(Some("not-an-app-id".into())), None);
+        assert_eq!(
+            configured_app_id(Some("123456789012345678".into())),
+            Some("123456789012345678".into())
+        );
+    }
+
+    #[test]
     fn activities_say_what_the_player_does_and_nothing_private() {
         assert_eq!(activity(Status::Off, None), None);
         let menus = activity(Status::Menus, None).unwrap();
         assert_eq!(menus["details"], "In the menus");
         assert!(menus.get("state").is_none() && menus.get("timestamps").is_none());
-        assert_eq!(menus["assets"]["large_image"], "horizon");
+        assert_eq!(menus["assets"]["large_image"], LARGE_IMAGE);
+        assert_eq!(menus["assets"]["large_text"], LARGE_IMAGE_TEXT);
 
         let single = activity(world(Play::Singleplayer, Dimension::Nether), Some(1000)).unwrap();
         assert_eq!(single["details"], "Singleplayer");
@@ -580,7 +604,8 @@ mod tests {
     /// A fake Discord: answers the handshake with READY, each command with its nonce, after a ping.
     #[cfg(unix)]
     #[test]
-    fn talks_to_discord_over_its_socket() {
+    fn talks_to_fake_discord_with_an_explicit_test_app_id() {
+        const TEST_APP_ID: &str = "123456789012345678";
         let dir = std::env::temp_dir().join(format!("horizon-discord-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("discord-ipc-0");
@@ -590,6 +615,7 @@ mod tests {
             let (mut s, _) = listener.accept().unwrap();
             let (op, hello) = read_frame(&mut s).unwrap();
             assert_eq!((op, &hello["v"]), (HANDSHAKE, &json!(1)));
+            assert_eq!(hello["client_id"], TEST_APP_ID);
             let ready = json!({"cmd": "DISPATCH", "evt": "READY", "data": {"v": 1}});
             s.write_all(&encode(FRAME, &ready)).unwrap();
             let mut got = Vec::new();
@@ -608,7 +634,7 @@ mod tests {
             pipe: open(&path).unwrap(),
             nonce: 0,
         };
-        client.handshake().unwrap();
+        client.handshake(TEST_APP_ID).unwrap();
         let shown = activity(world(Play::Singleplayer, Dimension::End), Some(7));
         client.set_activity(shown.clone()).unwrap();
         client.set_activity(None).unwrap();

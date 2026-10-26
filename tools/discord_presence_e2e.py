@@ -12,7 +12,8 @@ The game goes title -> world -> Nether -> quit through horizon-ctl, and the acti
                the host "Hosting a world" with a party of 2 of 8 (lan-in-frame: the host in-frame)
     setting    off in horizon-extras.txt: nothing reaches Discord; the Horizon Settings switch
                turns it on (the activity appears) and off (it is cleared)
-    late       Discord starts after the game: found within the 15 s retry
+    no-app-id  no handshake is sent when the app ID is unset
+    late       the fake Discord starts after the game: found within the 15 s retry
 
     python3 tools/discord_presence_e2e.py                    # all of them
     python3 tools/discord_presence_e2e.py --check lan --bin-dir target/fast
@@ -40,6 +41,7 @@ except ImportError:
 
 ROOT = Path(__file__).resolve().parents[1]
 HANDSHAKE, FRAME, CLOSE = 0, 1, 2
+TEST_APP_ID = '123456789012345678'
 
 
 class FakeDiscord:
@@ -126,7 +128,7 @@ def shows(details, state=None):
 class Game:
     """One game started by horizon-ctl in a scratch home, with its own fake Discord."""
 
-    def __init__(self, bins, name, args=(), extras=None, discord_running=True):
+    def __init__(self, bins, name, args=(), extras=None, discord_running=True, app_id=TEST_APP_ID):
         self.ctl = bins / 'horizon-ctl'
         self.home = Path(tempfile.mkdtemp(prefix=f'hzdp-{name}-'))
         if extras:
@@ -135,8 +137,13 @@ class Game:
         self.discord = FakeDiscord()
         if discord_running:
             self.discord.start()
-        extra = {'HORIZON_HOME': self.home, 'HORIZON_TELEMETRY_URL': 'off', 'HORIZON_DISCORD_IPC_DIR': self.discord.dir}
+        extra = {'HORIZON_HOME': self.home, 'HORIZON_TELEMETRY_URL': 'off', 'HORIZON_NO_DISCORD': '0',
+                 'HORIZON_DISCORD_IPC_DIR': self.discord.dir}
+        if app_id is not None:
+            extra['HORIZON_DISCORD_APP_ID'] = app_id
         self.env = lab.game_env(**extra)
+        if app_id is None:
+            self.env.pop('HORIZON_DISCORD_APP_ID', None)
         self.ctl_run('launch', '--offscreen', '--game', str(bins / 'horizon-client'), '--resources',
                      str(lab.RESOURCES.resolve()), *args)
 
@@ -165,7 +172,8 @@ def single(bins, args=()):
     d = game.discord
     try:
         d.wait('title screen', shows('In the menus'))
-        assert d.handshakes[0]['v'] == 1 and d.handshakes[0]['client_id'], d.handshakes
+        assert d.handshakes[0]['v'] == 1 and d.handshakes[0]['client_id'] == TEST_APP_ID, d.handshakes
+        assert d.last()['assets'] == {'large_image': 'rust_edition', 'large_text': 'Minecraft: Rust Edition'}
         game.ctl_run('open', 'Presence', '5', 'creative')
         game.ctl_run('wait-for', 'loaded', '--timeout', '300')
         d.wait('in the world', shows('Singleplayer', 'In the Overworld'))
@@ -246,9 +254,23 @@ def late(bins):
         game.close()
 
 
+def no_app_id(bins):
+    """An unset app ID leaves presence off, even with a fake Discord socket available."""
+    game = Game(bins, 'no-app-id', app_id=None)
+    try:
+        game.ctl_run('wait-for', 'screen', 'title')
+        time.sleep(3)
+        assert not game.discord.handshakes and not game.discord.activities, (game.discord.handshakes,
+                                                                              game.discord.activities)
+        print('  ok: no app ID, no connection')
+        game.quit()
+    finally:
+        game.close()
+
+
 CHECKS = {'single': single, 'in-frame': lambda b: single(b, ['--in-frame']), 'lan': lan,
           'lan-in-frame': lambda b: lan(b, ['--in-frame']), 'setting': setting,
-          'late': late}
+          'no-app-id': no_app_id, 'late': late}
 
 
 def main():

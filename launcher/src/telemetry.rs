@@ -32,7 +32,7 @@ pub const SWITCHES: [(Kind, &str, &str); 4] = [
     (
         Kind::Benchmark,
         "Benchmark uploads",
-        "The results of benchmarks you run, for the community results on playhorizon.dev.",
+        "Results from benchmarks you run. When uploads are allowed, they go to the configured endpoint (HORIZON_TELEMETRY_URL); none is set by default, so reports stay on this machine.",
     ),
 ];
 

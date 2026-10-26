@@ -607,7 +607,7 @@ impl Opt {
             }),
             Opt::PadKeyboard => Text::literal(match s.controller.keyboard {
                 gamepad::TextKeyboard::Auto => "Auto",
-                gamepad::TextKeyboard::Horizon => "Horizon",
+                gamepad::TextKeyboard::Horizon => "Built-in",
                 gamepad::TextKeyboard::Steam => "Steam",
             }),
             _ => Text::empty(),
@@ -1092,10 +1092,10 @@ fn option_widget(s: &Settings, opt: Opt, x: f32, y: f32, w: f32) -> Widget {
 /// What a button opening one of Horizon's pages says on hover.
 fn horizon_page_tooltip(page: Page) -> Option<&'static str> {
     Some(match page {
-        Page::Horizon => "Horizon's own settings: graphics, controllers, extras and mods.",
+        Page::Horizon => "Rust Edition settings: graphics, controllers, extras and mods.",
         Page::Graphics => "Graphics, simply: each setting says what it costs.",
         Page::GraphicsAdvanced => {
-            "Every graphics setting, Horizon's included, with what each costs."
+            "Every graphics setting, with its effect on speed and image quality."
         }
         Page::Controller => "Controllers: their buttons, sticks, vibration and menu navigation.",
         Page::Extras => {
@@ -1103,10 +1103,10 @@ fn horizon_page_tooltip(page: Page) -> Option<&'static str> {
         }
         Page::Agent => "Let your own AI agent play: horizon-ctl and MCP clients on this computer.",
         Page::ShaderPacks => {
-            "Shader packs from the shaderpacks folder: Horizon's own and those in the shaders/ format. One runs at a time."
+            "Shader packs from the shaderpacks folder: native packs and those in the shaders/ format. One runs at a time."
         }
         Page::Mods => {
-            "Mods made for Horizon, from the horizon-mods folder. Each runs in a sandbox and stays off until you turn it on."
+            "Native Rust Edition mods from the horizon-mods folder. Each stays off until you turn it on. Java and Fabric mods are not supported yet."
         }
         _ => return None,
     })
@@ -1200,9 +1200,9 @@ impl OptionsUi {
             Page::Graphics | Page::GraphicsAdvanced => "options.videoTitle",
             Page::Controller => "Controller Settings",
             Page::PadBinds => "Controller Binds",
-            Page::Extras => "Horizon Extras",
+            Page::Extras => "Rust Edition Extras",
             Page::Credits => "credits_and_attribution.screen.title",
-            Page::Horizon => "Horizon Settings",
+            Page::Horizon => "Rust Edition Settings",
             Page::Agent => "AI Agent",
         }
     }
@@ -1359,7 +1359,7 @@ impl OptionsUi {
                         0.0,
                         0.0,
                         150.0,
-                        Text::literal("Horizon Graphics..."),
+                        Text::literal("Rust Edition Graphics..."),
                         Act::Push(Page::Graphics),
                     ),
                     Some(button(
@@ -1564,7 +1564,7 @@ impl OptionsUi {
                     .enumerate()
                     .map(|(i, pack)| {
                         let kind = match pack.kind {
-                            crate::shader_pack_list::Kind::Horizon => " (Horizon)",
+                            crate::shader_pack_list::Kind::Horizon => " (native)",
                             crate::shader_pack_list::Kind::Classic => "",
                         };
                         let label = Text::literal(format!("{}{kind}: ", pack.title))
@@ -1625,7 +1625,7 @@ impl OptionsUi {
                     // Vanilla's Telemetry Data and Credits slots: Horizon's
                     // settings and its mods, as a mod adds its button here.
                     // Credits & Attribution (WinScreen's credits) follows them.
-                    ("Horizon Settings...", Some(Page::Horizon)),
+                    ("Rust Edition Settings...", Some(Page::Horizon)),
                     ("Mods...", Some(Page::Mods)),
                     ("options.credits_and_attribution", Some(Page::Credits)),
                 ];
@@ -2210,7 +2210,7 @@ impl OptionsUi {
                     && !opt.available()
                 {
                     tooltip = Some(atlas.font.split(
-                        &Text::literal("This feature is not yet available in Horizon."),
+                        &Text::literal("This feature is not yet available in Rust Edition."),
                         170.0,
                     ));
                 }
