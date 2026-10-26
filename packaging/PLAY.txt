@@ -1,30 +1,41 @@
-Horizon: Minecraft Java Edition 26.3, rewritten in Rust
-=========================================================
+Minecraft: Rust Edition — source test build
+==========================================
 
-Horizon is an unofficial fan project, not affiliated with, endorsed by or
-connected to Mojang Studios or Microsoft. Minecraft is a trademark of Mojang
-and Microsoft. This folder contains none of Minecraft's code, textures or
-sounds: Horizon prepares them from your own copy of Minecraft Java Edition.
+This is an unofficial fork of Horizon. It is not approved by or associated
+with Mojang or Microsoft. The original MIT license is included in LICENSE.
+This folder contains no Minecraft game jars, textures or sounds. Preparation
+reads your own Minecraft installation. Gameplay runs in Rust.
 
-Playing through the Horizon launcher
-  Nothing to do here: the launcher installed this folder, prepares the
-  resources the first time you press Play, and starts the game. Use the
-  launcher to update, play or run a server.
+Fabric and Java mod code do not run in this build. Basic online login and
+signed chat have passed local server checks, but full Java compatibility
+has not been established.
 
-Downloaded this archive directly?
-  Get the launcher instead; it installs, prepares and updates Horizon for you:
-  https://github.com/ludovic111/horizon/releases?q=launcher-v&expanded=true
-  More about Horizon: https://playhorizon.dev
+Start with the launcher
+  Open Minecraft Rust Edition.app on macOS, or run horizon-launcher
+  (horizon-launcher.exe on Windows). In Versions, choose this unpacked
+  build folder under Local builds. Select the installed local build,
+  prepare its files from your Minecraft installation, then press Play.
+  START-HERE.md explains the source-build setup and account import.
 
-  To prepare this folder by hand you need Minecraft Java Edition 26.3, played
-  once from the official launcher, and a Java 25 runtime. Then, in this folder:
+  The current game pin is Minecraft Java Edition 26.3. Preparation needs
+  a Java 25 JDK with javac, which compiles the included preparation tools.
+  The official launcher's installed runtime can supply it when available.
+
+  For online play, use Import launcher session in Settings. On macOS,
+  you may need to start your official Minecraft installation once so the
+  importer can read the selected account's running game session.
+
+  Project and future releases:
+  https://github.com/calebtrueman/minecraft-rust-edition
+  This is a source test package, not a signed release.
+
+Prepare by hand
+  From this folder, with Java 25 and Minecraft 26.3 installed:
     ./horizon-prepare --prepare --server-jar PATH/TO/server.jar
-    ./horizon-prepare sounds               (optional, for sound)
-  (Windows: horizon-prepare.exe.) The 26.3 server jar is the downloads.server.url
-  in your launcher's versions/26.3/26.3.json. Add --minecraft-dir PATH to both if
-  your launcher keeps the game elsewhere. Then run
-  ./horizon-client (horizon-client.exe on Windows; on macOS the first time:
-  right-click > Open). horizon-client --help lists the options.
+    ./horizon-prepare sounds
+  Add --minecraft-dir PATH if the game is installed elsewhere. On Windows,
+  use horizon-prepare.exe. Then run horizon-client (horizon-client.exe on
+  Windows). These internal program names have not changed yet.
 
 Controls: mouse look, WASD move, Space jump, Left Shift sneak, Left Ctrl
 sprint, left click break, right click place/use, 1-9 or scroll for the hotbar,
