@@ -5,6 +5,8 @@
 //! --bins -p horizon-prepare -p horizon-server), the exporters horizon-prepare compiles, its sources (the launcher compares
 //! them to its own), and PLAY.txt. It holds none of Minecraft's files: players prepare those
 //! from their own copy. .github/workflows/release.yml makes the release folders with it.
+//! `package-source BINARY OUTDIR` leaves out the compiled exporters. Preparation compiles the
+//! included original Java sources against the player's own game files, using a matching JDK.
 //!
 //! `package-server ENGINE OUTDIR`: a server folder (docs/server.md): the server build of the game
 //! (`cargo build --release -p horizon-client --no-default-features`, without sound or controllers)
@@ -21,7 +23,7 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, ExitCode};
 
-const USAGE: &str = "usage: cargo run -p xtask -- package BINARY OUTDIR | package-server ENGINE OUTDIR | tokens | icons";
+const USAGE: &str = "usage: cargo run -p xtask -- package BINARY OUTDIR | package-source BINARY OUTDIR | package-server ENGINE OUTDIR | tokens | icons";
 
 /// What the release folder takes from the repository at HEAD, as `git archive` writes it.
 const ARCHIVED: [&str; 5] = [
@@ -44,7 +46,9 @@ const SERVER_TOOLS: [&str; 2] = ["horizon-prepare", "horizon-server"];
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.as_slice() {
-        [task, binary, out] if task == "package" => package(Path::new(binary), Path::new(out)),
+        [task, binary, out] if task == "package" || task == "package-source" => {
+            package(Path::new(binary), Path::new(out), task == "package")
+        }
         [task, engine, out] if task == "package-server" => {
             package_server(Path::new(engine), Path::new(out))
         }
@@ -218,11 +222,17 @@ fn icons() -> Result<(), String> {
     Ok(())
 }
 
-fn package(binary: &Path, out: &Path) -> Result<(), String> {
+fn package(binary: &Path, out: &Path, compiled_exporters: bool) -> Result<(), String> {
     let repo = new_folder(out)?;
     copy_into(binary, out)?;
     copy_beside(binary, &TOOLS, out)?;
-    copy_exporters(&repo.join("exporters"), &out.join("exporters"))?;
+    if compiled_exporters {
+        copy_exporters(&repo.join("exporters"), &out.join("exporters"))?;
+    } else {
+        fs::write(out.join("SOURCE-BUILD.txt"),
+            "Minecraft: Rust Edition — source build\n\nThis package contains the native Rust game and original preparation sources.\nIt contains no Minecraft game files or prepared resources.\nFirst preparation needs a JDK matching research-lock.json and your own copy\nof that Minecraft version. The preparer compiles the included Java sources\non your computer; gameplay runs in Rust.\n\nFabric and Java mod execution are not yet supported.\nThis build has not passed the full Java gameplay and multiplayer checks.\n")
+            .map_err(|e| e.to_string())?;
+    }
     let play = repo.join("packaging/PLAY.txt");
     copy(&play, &out.join("PLAY.txt"))
 }
@@ -456,6 +466,36 @@ fn extract(tar: &[u8], out: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_packages_include_original_sources_without_game_files() {
+        let temp =
+            std::env::temp_dir().join(format!("xtask-source-package-{}", std::process::id()));
+        fs::create_dir_all(temp.join("bin")).unwrap();
+        let binary = temp.join("bin/horizon-client");
+        fs::write(&binary, "original test executable").unwrap();
+        for tool in TOOLS {
+            fs::write(temp.join("bin").join(tool), "original test tool").unwrap();
+        }
+        let out = temp.join("package");
+        package(&binary, &out, false).unwrap();
+        assert!(out.join("horizon-prepare").is_file());
+        assert!(out.join("research-lock.json").is_file());
+        assert!(
+            out.join("mods/horizon/src/test/java/dev/horizonlab/parity/PrepareWorker.java")
+                .is_file()
+        );
+        assert!(
+            out.join("crates/horizon-prepare/src/exporters.rs")
+                .is_file()
+        );
+        assert!(out.join("SOURCE-BUILD.txt").is_file());
+        assert!(!out.join("exporters").exists());
+        assert!(!out.join(".local").exists());
+        assert!(!out.join("resources").exists());
+        assert!(!out.join("assets").exists());
+        fs::remove_dir_all(temp).unwrap();
+    }
 
     fn header(name: &str, mode: u32, size: usize, kind: u8) -> Vec<u8> {
         let mut h = vec![0u8; 512];

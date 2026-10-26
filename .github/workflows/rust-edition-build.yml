@@ -1,0 +1,138 @@
+name: Rust Edition source builds
+
+# A fork must be able to build without the upstream author's private machines,
+# game files or signing secrets. These are test artifacts, not signed releases.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-edition-build-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  java-runtime:
+    name: Rust bytecode tests against Java 25
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+      - run: cargo fmt --manifest-path crates/horizon-jvm/Cargo.toml --all -- --check
+      - run: cargo test --manifest-path crates/horizon-jvm/Cargo.toml --locked
+      - run: cargo clippy --manifest-path crates/horizon-jvm/Cargo.toml --locked --all-targets -- -D warnings
+
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-24.04
+            exe: ''
+          - name: macos-arm64
+            os: macos-15
+            exe: ''
+          - name: windows-x64
+            os: windows-latest
+            exe: .exe
+            rustflags: -C target-feature=+crt-static
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_RELEASE_DEBUG: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      RUSTFLAGS: ${{ matrix.rustflags }}
+      HORIZON_TELEMETRY_URL: 'off'
+      HORIZON_NO_KEYCHAIN: '1'
+      HORIZON_LAUNCHER_NO_SELF_UPDATE: '1'
+      HORIZON_NO_AUDIO: '1'
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            launcher -> ../target
+          shared-key: rust-edition-${{ matrix.name }}
+      - name: Linux build libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libudev-dev libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libfontconfig-dev libvulkan-dev
+      - name: Keep every test away from player folders
+        run: |
+          scratch="${RUNNER_TEMP//\\//}/rust-edition-check"
+          mkdir -p "$scratch"
+          echo "HORIZON_HOME=$scratch/game" >> "$GITHUB_ENV"
+          echo "HORIZON_LAUNCHER_HOME=$scratch/launcher" >> "$GITHUB_ENV"
+          echo "XDG_DATA_HOME=$scratch/data" >> "$GITHUB_ENV"
+          echo "XDG_CONFIG_HOME=$scratch/config" >> "$GITHUB_ENV"
+      - name: Compile Metal shaders at startup when the build tool is absent
+        if: runner.os == 'macOS'
+        run: |
+          probe="$RUNNER_TEMP/rust-edition-metal-check.metal"
+          printf '%s\n' '#include <metal_stdlib>' 'using namespace metal;' 'kernel void probe(device float* value [[buffer(0)]]) { value[0] = 0; }' > "$probe"
+          if ! xcrun -sdk macosx metal -c "$probe" -o "$RUNNER_TEMP/rust-edition-metal-check.air" >/dev/null 2>&1; then
+            echo "LAUNCHER_FEATURES=gpui/runtime_shaders" >> "$GITHUB_ENV"
+          fi
+      - name: Check the package tools and launcher
+        run: |
+          cargo test --locked -p xtask
+          # macOS rejects this existing test's re-signed /usr/bin/true fixture.
+          # Other update checks remain enabled; this is not a release approval.
+          cargo test --manifest-path launcher/Cargo.toml --locked --lib --bins --tests ${LAUNCHER_FEATURES:+--features "$LAUNCHER_FEATURES"} -- --skip backend::tests::an_app_bundle_updates_in_place
+      - name: Build native programs
+        run: |
+          cargo build --profile fast --locked --features horizon-client/mods -p horizon-client --bin horizon-client --bin horizon-ctl -p horizon-prepare --bin horizon-prepare -p horizon-server --bin horizon-server
+          cargo build --manifest-path launcher/Cargo.toml --release --locked ${LAUNCHER_FEATURES:+--features "$LAUNCHER_FEATURES"}
+      - name: Package only original code and preparation sources
+        run: |
+          cargo run --locked -p xtask -- package-source "target/fast/horizon-client${{ matrix.exe }}" "dist/minecraft-rust-edition-${{ matrix.name }}"
+          cp "target/release/horizon-launcher${{ matrix.exe }}" "dist/minecraft-rust-edition-${{ matrix.name }}/"
+          cp docs/source-builds.md "dist/minecraft-rust-edition-${{ matrix.name }}/START-HERE.md"
+      - name: Check the packaged programs and local install
+        run: |
+          bundle="$PWD/dist/minecraft-rust-edition-${{ matrix.name }}"
+          "$bundle/horizon-client${{ matrix.exe }}" --help
+          "$bundle/horizon-prepare${{ matrix.exe }}" --help
+          "$bundle/horizon-launcher${{ matrix.exe }}" install-local "$bundle" --tag local-ci
+          "$bundle/horizon-launcher${{ matrix.exe }}" versions --installed
+      - name: Archive
+        run: |
+          cd dist
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            tar czf "minecraft-rust-edition-${{ matrix.name }}.tar.gz" "minecraft-rust-edition-${{ matrix.name }}"
+          elif [[ "$RUNNER_OS" == macOS ]]; then
+            ditto -c -k --norsrc --noextattr --noqtn --keepParent "minecraft-rust-edition-${{ matrix.name }}" "minecraft-rust-edition-${{ matrix.name }}.zip"
+          else
+            7z a -tzip "minecraft-rust-edition-${{ matrix.name }}.zip" "minecraft-rust-edition-${{ matrix.name }}"
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: minecraft-rust-edition-${{ matrix.name }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+          if-no-files-found: error
+          retention-days: 14
