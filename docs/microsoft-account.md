@@ -202,6 +202,11 @@ and AES/CFB8 are all checked against vanilla's code), the player spawns, chats a
 Negative cases: a token the mock rejects (the client must show vanilla's "Invalid session" message)
 and a client that skips the join (the server must say "Failed to verify username!").
 
+With `HORIZON_NET_BLOCK_INTERACTION=1`, the same mock login also runs against a fresh local Java server.
+Only that temporary server gives the mock player operator access. The Rust client then places an oak
+plank and breaks it with its normal mouse actions. Each change must match both the server's block check
+and the block state the client gets back. This covers these two actions only, not full multiplayer gameplay.
+
 Rust unit tests: server hash vectors (Notch, jeb_, simon), RSA wrapping round trip with a test key,
 X.509 key parsing, AES/CFB8 vectors (already in `horizon-protocol`), the session file (permissions,
 age, deletion), the error mapping. Launcher: the whole token chain against a local mock of the

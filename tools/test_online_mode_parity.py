@@ -176,19 +176,37 @@ def session_file(directory, token):
     return path
 
 
-def run_client(binary, build, port, label, token, discovery):
+def run_client(binary, build, port, label, token, discovery, *, block_interaction=False, timeout=300):
     directory = build / f'client-{label}'
     shutil.rmtree(directory, ignore_errors=True)
     directory.mkdir()
     report = directory / 'report.json'
     env = lab.game_env(HORIZON_NET_REPORT=report, HORIZON_API_DISCOVERY=discovery)
+    if block_interaction:
+        env['HORIZON_NET_BLOCK_INTERACTION'] = '1'
     command = [binary, '--resources', lab.RESOURCES, '--render-distance', 2,
                '--server', f'127.0.0.1:{port}', '--name', PLAYER]
     if token:
         command += ['--session-file', session_file(directory, token)]
-    with (build / f'client-{label}.log').open('w') as log:
-        run_game([str(c) for c in command], cwd=directory, env=env, stdout=log, stderr=subprocess.STDOUT,
-                       timeout=300, check=True)
+    client_log = build / f'client-{label}.log'
+    try:
+        with client_log.open('w') as log:
+            completed = run_game([str(c) for c in command], cwd=directory, env=env, stdout=log,
+                                 stderr=subprocess.STDOUT, timeout=timeout, check=False)
+    except subprocess.TimeoutExpired as error:
+        tail = client_log.read_text(encoding='utf-8', errors='replace').splitlines()[-30:]
+        state = report.read_text(encoding='utf-8') if report.exists() else 'no JSON report was written'
+        raise AssertionError(f'{label}: client timed out after {timeout}s; report={state}; '
+                             f'log={client_log}; last lines:\n' + '\n'.join(tail)) from error
+    if completed.returncode:
+        tail = client_log.read_text(encoding='utf-8', errors='replace').splitlines()[-30:]
+        state = report.read_text(encoding='utf-8') if report.exists() else 'no JSON report was written'
+        raise AssertionError(f'{label}: client exited with {completed.returncode}; report={state}; '
+                             f'log={client_log}; last lines:\n' + '\n'.join(tail))
+    if not report.exists():
+        tail = client_log.read_text(encoding='utf-8', errors='replace').splitlines()[-30:]
+        raise AssertionError(f'{label}: client exited without writing {report}; log={client_log}; '
+                             'last lines:\n' + '\n'.join(tail))
     got = json.loads(report.read_text())
     got['session file left'] = (directory / 'session.json').exists()
     return got
@@ -345,6 +363,71 @@ def run_side(label, command, binary, build, services, discovery):
     return checks, player_lines(server.lines, starts)
 
 
+def run_vanilla_block_interaction(command, binary, build, services, discovery):
+    """Use the normal Rust client's mouse input against a disposable Java server."""
+    port = free_port()
+    directory = build / 'vanilla-block-interaction'
+    shutil.rmtree(directory, ignore_errors=True)
+    directory.mkdir(parents=True)
+    props = dict(PROPERTIES, **{'server-port': str(port)})
+    (directory / 'server.properties').write_text(''.join(f'{k}={v}\n' for k, v in props.items()))
+    (directory / 'eula.txt').write_text('eula=true\n')
+    # This synthetic account exists only in the mock service and this fresh server folder.
+    lab.write_json(directory / 'ops.json', [{
+        'uuid': dashed(PLAYER_UUID), 'name': PLAYER, 'level': 4, 'bypassesPlayerLimit': False,
+    }])
+    services.take_log()
+    server = Server(command, directory, 'vanilla-block-interaction')
+    checks = []
+
+    def check(name, actual, expected):
+        checks.append(f'{name}: ' + ('ok' if actual == expected else f'expected {expected!r}, got {actual!r}'))
+
+    try:
+        server.wait_for(r'Done \(', timeout=600)
+        services.take_log()
+        got = run_client(binary, build, port, 'vanilla-block-interaction', GOOD, discovery,
+                         block_interaction=True, timeout=180)
+        interaction = got.get('block_interaction', {})
+        place_marker = interaction.get('place_marker')
+        break_marker = interaction.get('break_marker')
+        chat = got.get('chat', [])
+        service_log = services.take_log()
+        joins = [entry for entry in service_log if entry[0] == 'join']
+        verifies = [entry for entry in service_log if entry[0] == 'verify']
+        server_says = set(line.rsplit(' ', 1)[-1] for line in server.lines if '[Tester] ' in line)
+
+        check('connected throughout', got.get('connected_throughout'), True)
+        check('client error', got.get('error'), None)
+        check('synthetic player joined the session service', [(e[1], e[3]) for e in joins],
+              [(PLAYER_UUID, True)])
+        check('Java server verified the session hash',
+              [(e[1], e[2], e[3]) for e in verifies],
+              [(PLAYER, joins[0][2] if joins else None, True)])
+        check('server confirmed placement with exact say response',
+              place_marker is not None and f'[Tester] {place_marker}' in chat, True)
+        check('Java server log recorded the exact placement marker',
+              place_marker in server_says if place_marker is not None else False, True)
+        check('client received the acknowledged placed block',
+              interaction.get('client_confirmed_placement'), True)
+        check('server confirmed breaking with exact say response',
+              break_marker is not None and f'[Tester] {break_marker}' in chat, True)
+        check('Java server log recorded the exact break marker',
+              break_marker in server_says if break_marker is not None else False, True)
+        check('client received the acknowledged air block', interaction.get('client_confirmed_break'), True)
+        check('placed block is air at the end', interaction.get('client_block_after_test'), 'minecraft:air')
+        check('chunks received', got.get('chunks', 0) > 0, True)
+        check('session file deleted', got.get('session file left'), False)
+        server.wait_for(r'Tester left the game', timeout=60)
+    except AssertionError as error:
+        recent = '\n'.join(server.lines[-30:])
+        raise AssertionError(f'vanilla block interaction: {error}; server log={server.log_path}; '
+                             f'last server lines:\n{recent}') from error
+    finally:
+        server.stop()
+    return checks
+
+
 def main():
     lock, jars, libraries = base.verify_artifacts()
     build = lab.LOCAL / NAME
@@ -368,6 +451,8 @@ def main():
         for label, command in [('vanilla', vanilla), ('horizon', horizon)]:
             side_checks, transcripts[label] = run_side(label, command, binary, build, services, discovery)
             checks += [f'{label}: {c}' for c in side_checks]
+        checks += [f'vanilla native block interaction: {c}' for c in
+                   run_vanilla_block_interaction(vanilla, binary, build, services, discovery)]
     finally:
         services.stop()
     for label in transcripts:

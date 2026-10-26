@@ -11,6 +11,9 @@
 //! `HORIZON_NET_SECURE_CHAT_INTERVAL_MS` (50–1000, default 250). It sends
 //! spaced signed lines, then a signed `/tell` to itself, and reports echoes,
 //! standalone `ChatAck` packets, and offsets carried in outgoing chat.
+//! The separate `HORIZON_NET_BLOCK_INTERACTION=1` run places and breaks a block
+//! through normal mouse input, then waits for the server's chat reply and the
+//! client's acknowledged block state.
 use super::{Game, remote::ChatSendEvidence};
 use horizon_client::Result;
 use serde_json::json;
@@ -19,9 +22,11 @@ use std::{
     path::Path,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+use winit::event::MouseButton;
 
 const STRESS_COUNT_ENV: &str = "HORIZON_NET_SECURE_CHAT_COUNT";
 const STRESS_INTERVAL_ENV: &str = "HORIZON_NET_SECURE_CHAT_INTERVAL_MS";
+const BLOCK_INTERACTION_ENV: &str = "HORIZON_NET_BLOCK_INTERACTION";
 
 #[derive(Clone, Copy)]
 struct SecureChatStressConfig {
@@ -156,6 +161,15 @@ enum StressStep {
     Done,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BlockInteractionStep {
+    WaitingForWorld,
+    SettingUp,
+    WaitingForPlace,
+    WaitingForBreak,
+    Done,
+}
+
 impl Game<'_> {
     pub(super) fn run_net_harness(&mut self, report: &Path) -> Result<()> {
         let stress = match SecureChatStressConfig::from_env() {
@@ -172,10 +186,275 @@ impl Game<'_> {
                 return Ok(());
             }
         };
+        if let Ok(value) = std::env::var(BLOCK_INTERACTION_ENV) {
+            if value != "1" || stress.is_some() {
+                if self.remote.is_some() {
+                    self.leave_server(None)?;
+                }
+                std::fs::write(
+                    report,
+                    json!({ "error": format!("{BLOCK_INTERACTION_ENV} must be 1 and cannot be combined with secure-chat stress") })
+                        .to_string(),
+                )?;
+                return Ok(());
+            }
+            return self.run_block_interaction_harness(report);
+        }
         if let Some(config) = stress {
             return self.run_secure_chat_stress_harness(report, config);
         }
         self.run_default_net_harness(report)
+    }
+
+    fn run_block_interaction_harness(&mut self, report: &Path) -> Result<()> {
+        const SUPPORT: [i32; 3] = [0, 99, 0];
+        const TARGET: [i32; 3] = [0, 100, 2];
+        const PLACED: [i32; 3] = [0, 100, 1];
+
+        let started_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let marker = format!("horizon-block-{}-{started_ms}", std::process::id());
+        let place_marker = format!("{marker}-placed");
+        let break_marker = format!("{marker}-broken");
+        let deadline = Instant::now() + Duration::from_secs(120);
+        let mut next_tick = Instant::now();
+        let mut quiet_since = Instant::now();
+        let mut last_chunks = 0;
+        let mut chunks = 0;
+        let mut step_at = Instant::now();
+        let mut step = BlockInteractionStep::WaitingForWorld;
+        let mut position = None;
+        let mut place_check_sent = false;
+        let mut place_server_confirmed = false;
+        let mut place_client_confirmed = false;
+        let mut break_check_sent = false;
+        let mut break_server_confirmed = false;
+        let mut break_client_confirmed = false;
+        let mut selected_slot = None;
+        let mut error = None;
+
+        while Instant::now() < deadline {
+            self.update_world();
+            if self.remote.is_none() {
+                error = Some(match self.title.as_ref().map(|t| &t.mode) {
+                    Some(horizon_client::title::Mode::Multiplayer(
+                        horizon_client::multiplayer::Screen::Disconnected { reason, .. },
+                    )) => format!("disconnected: {reason}"),
+                    _ => "disconnected".to_owned(),
+                });
+                break;
+            }
+            if Instant::now() >= next_tick {
+                next_tick += Duration::from_millis(50);
+                self.tick()?;
+            }
+            let now = Instant::now();
+            if let Some(player) = &self.player {
+                position = Some([player.position.x, player.position.y, player.position.z]);
+            }
+            let chunk_count = self.world.chunks.len();
+            chunks = chunk_count;
+            if chunk_count != last_chunks {
+                last_chunks = chunk_count;
+                quiet_since = now;
+            }
+            let chat: Vec<String> = self
+                .remote
+                .as_ref()
+                .map(|remote| remote.chat.iter().map(|(line, _)| line.clone()).collect())
+                .unwrap_or_default();
+
+            match step {
+                BlockInteractionStep::WaitingForWorld
+                    if position.is_some()
+                        && chunk_count > 0
+                        && now - quiet_since > Duration::from_secs(3) =>
+                {
+                    let name = self
+                        .remote
+                        .as_ref()
+                        .map(|remote| remote.profile_name.clone())
+                        .ok_or("joined player name disappeared")?;
+                    // The Java test server gives this synthetic mock player operator status.
+                    // These commands prepare a fixed, disposable block pad on that server.
+                    for command in [
+                        format!("/gamemode creative {name}"),
+                        format!(
+                            "/setblock {} {} {} minecraft:stone",
+                            SUPPORT[0], SUPPORT[1], SUPPORT[2]
+                        ),
+                        format!(
+                            "/setblock {} {} {} minecraft:air",
+                            PLACED[0], PLACED[1], PLACED[2]
+                        ),
+                        format!(
+                            "/setblock {} {} {} minecraft:stone",
+                            TARGET[0], TARGET[1], TARGET[2]
+                        ),
+                        format!("/give {name} minecraft:oak_planks 1"),
+                        format!("/tp {name} 0.5 100.0 0.5 0 20"),
+                    ] {
+                        self.send_chat(&command);
+                    }
+                    step = BlockInteractionStep::SettingUp;
+                    step_at = now;
+                }
+                BlockInteractionStep::SettingUp => {
+                    let slot = self.inventory.iter().take(9).position(|stack| {
+                        stack
+                            .as_ref()
+                            .is_some_and(|stack| &*stack.item == "minecraft:oak_planks")
+                    });
+                    let at_position = position.is_some_and(|p| {
+                        (p[0] - 0.5).abs() < 0.15
+                            && (p[1] - 100.0).abs() < 0.25
+                            && (p[2] - 0.5).abs() < 0.15
+                    });
+                    let pad_ready = self.world.loaded(0, 0)
+                        && self.block_name(SUPPORT).as_ref() == "minecraft:stone"
+                        && self.block_name(TARGET).as_ref() == "minecraft:stone"
+                        && self.block_name(PLACED).as_ref() == "minecraft:air";
+                    if self.creative && at_position && pad_ready && slot.is_some() {
+                        selected_slot = slot;
+                        self.selected = slot.unwrap_or(0);
+                        self.yaw = 0.0;
+                        // Aim at the center of the stone's front face. The eye is
+                        // at y=101.62 and the face center is y=100.5.
+                        let player_position = position.expect("position was checked above");
+                        self.pitch = (player_position[1] + 1.62 - 100.5)
+                            .atan2(f64::from(TARGET[2]) - player_position[2])
+                            .to_degrees() as f32;
+                        self.remote_mouse(MouseButton::Right, true)?;
+                        self.tick()?;
+                        self.remote_mouse(MouseButton::Right, false)?;
+                        self.tick()?;
+                        step = BlockInteractionStep::WaitingForPlace;
+                        step_at = now;
+                    } else if now - step_at > Duration::from_secs(30) {
+                        error = Some(format!(
+                            "timed out setting up the block test (creative={}, position={position:?}, pad_ready={pad_ready}, oak_planks_hotbar_slot={slot:?}, chunks={chunk_count})",
+                            self.creative
+                        ));
+                        break;
+                    }
+                }
+                BlockInteractionStep::WaitingForPlace => {
+                    place_client_confirmed = self.block_name(PLACED).as_ref()
+                        == "minecraft:oak_planks"
+                        && !self.remote_block_prediction_pending(PLACED);
+                    if place_client_confirmed && !place_check_sent {
+                        self.send_chat(&format!(
+                            "/execute if block {} {} {} minecraft:oak_planks run say {place_marker}",
+                            PLACED[0], PLACED[1], PLACED[2]
+                        ));
+                        place_check_sent = true;
+                        step_at = now;
+                    }
+                    place_server_confirmed = chat
+                        .iter()
+                        .any(|line| line == &format!("[Tester] {place_marker}"));
+                    if place_server_confirmed && place_client_confirmed {
+                        // Aim at the newly placed block's near face before mining it.
+                        let player_position = position.expect("joined player position is present");
+                        self.pitch = (player_position[1] + 1.62 - 100.5)
+                            .atan2(f64::from(PLACED[2]) - player_position[2])
+                            .to_degrees() as f32;
+                        self.remote_mouse(MouseButton::Left, true)?;
+                        self.tick()?;
+                        self.remote_mouse(MouseButton::Left, false)?;
+                        self.tick()?;
+                        step = BlockInteractionStep::WaitingForBreak;
+                        step_at = now;
+                    } else if now - step_at > Duration::from_secs(20) {
+                        error = Some(format!(
+                            "timed out placing at {PLACED:?} (server check sent={}, exact say received={}, acknowledged client block={}, prediction pending={})",
+                            place_check_sent,
+                            place_server_confirmed,
+                            self.block_name(PLACED),
+                            self.remote_block_prediction_pending(PLACED),
+                        ));
+                        break;
+                    }
+                }
+                BlockInteractionStep::WaitingForBreak => {
+                    break_client_confirmed = self.block_name(PLACED).as_ref() == "minecraft:air"
+                        && !self.remote_block_prediction_pending(PLACED);
+                    if break_client_confirmed && !break_check_sent {
+                        self.send_chat(&format!(
+                            "/execute if block {} {} {} minecraft:air run say {break_marker}",
+                            PLACED[0], PLACED[1], PLACED[2]
+                        ));
+                        break_check_sent = true;
+                        step_at = now;
+                    }
+                    break_server_confirmed = chat
+                        .iter()
+                        .any(|line| line == &format!("[Tester] {break_marker}"));
+                    if break_server_confirmed && break_client_confirmed {
+                        step = BlockInteractionStep::Done;
+                        break;
+                    }
+                    if now - step_at > Duration::from_secs(20) {
+                        error = Some(format!(
+                            "timed out breaking at {PLACED:?} (server check sent={}, exact say received={}, acknowledged client block={}, prediction pending={})",
+                            break_check_sent,
+                            break_server_confirmed,
+                            self.block_name(PLACED),
+                            self.remote_block_prediction_pending(PLACED),
+                        ));
+                        break;
+                    }
+                }
+                BlockInteractionStep::Done => break,
+                _ => {}
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        if step != BlockInteractionStep::Done && error.is_none() {
+            error = Some(format!("timed out during block interaction step {step:?}"));
+        }
+        let chat: Vec<String> = self
+            .remote
+            .as_ref()
+            .map(|remote| remote.chat.iter().map(|(line, _)| line.clone()).collect())
+            .unwrap_or_default();
+        let client_block_after_test = self.block_name(PLACED).to_string();
+        let creative_enabled = self.creative;
+        let connected_throughout = error.is_none();
+        if self.remote.is_some() {
+            self.leave_server(None)?;
+        }
+        std::fs::write(
+            report,
+            json!({
+                "position": position,
+                "chunks": chunks,
+                "chat": chat,
+                "connected_throughout": connected_throughout,
+                "block_interaction": {
+                    "support_block": SUPPORT,
+                    "target_block": TARGET,
+                    "placed_block": PLACED,
+                    "creative_enabled": creative_enabled,
+                    "selected_oak_planks_hotbar_slot": selected_slot,
+                    "server_placement_check_sent": place_check_sent,
+                    "server_confirmed_placement": place_server_confirmed,
+                    "client_confirmed_placement": place_client_confirmed,
+                    "server_break_check_sent": break_check_sent,
+                    "server_confirmed_break": break_server_confirmed,
+                    "client_confirmed_break": break_client_confirmed,
+                    "client_block_after_test": client_block_after_test,
+                    "place_marker": place_marker,
+                    "break_marker": break_marker,
+                },
+                "error": error,
+            })
+            .to_string(),
+        )?;
+        Ok(())
     }
 
     fn run_secure_chat_stress_harness(

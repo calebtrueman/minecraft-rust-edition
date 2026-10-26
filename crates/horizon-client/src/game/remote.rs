@@ -1236,6 +1236,14 @@ impl Game<'_> {
             }
         }
     }
+
+    /// Whether a remote block action still awaits the server's block-change acknowledgement.
+    pub(super) fn remote_block_prediction_pending(&self, pos: [i32; 3]) -> bool {
+        self.remote
+            .as_ref()
+            .is_some_and(|remote| remote.predictions.contains_key(&pos))
+    }
+
     fn set_block(&mut self, pos: [i32; 3], state: i32) {
         let state = BlockStateId(state.max(0) as u32);
         if self.world.loaded(pos[0], pos[2])
