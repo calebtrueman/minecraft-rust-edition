@@ -15,6 +15,7 @@ struct Mock {
     xerr: Option<u64>,
     owns_game: bool,
     no_profile: bool,
+    profile_uuid: Option<String>,
     /// Every request: method, path and body.
     log: Vec<(String, String, String)>,
 }
@@ -107,7 +108,7 @@ fn route(mock: &mut Mock, method: &str, path: &str, auth: &str, body: &str) -> (
         ("GET", "/mc/minecraft/profile") => reply(
             200,
             json!({
-                "id": UUID, "name": "Notch",
+                "id": mock.profile_uuid.as_deref().unwrap_or(UUID), "name": "Notch",
                 "skins": [{"id": "s1", "state": "ACTIVE", "url": "http://textures.minecraft.net/texture/abc", "variant": "SLIM"}],
                 "capes": [{"id": "c1", "state": "INACTIVE", "url": "http://textures.minecraft.net/texture/cape1", "alias": "Migrator"},
                           {"id": "c2", "state": "ACTIVE", "url": "http://textures.minecraft.net/texture/cape2", "alias": "Vanilla"}],
@@ -463,5 +464,104 @@ fn imported_sessions_are_checked_and_reread_without_microsoft_refresh() {
     assert!(fresh(&ep, "", &account, secrets)
         .unwrap_err()
         .contains("expired"));
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn official_import_stays_on_the_same_profile_when_launcher_selection_changes() {
+    let path =
+        std::env::temp_dir().join(format!("mcre-official-import-{}.json", std::process::id()));
+    let mut data: Value = serde_json::from_str(include_str!(
+        "../../tests/fixtures/official-launcher-accounts.json"
+    ))
+    .unwrap();
+    std::fs::write(&path, data.to_string()).unwrap();
+    let (m, ep) = mock(|_| {});
+    let (account, secrets) = existing::read_session(&ep, &path, None).unwrap();
+    assert_eq!(account.uuid, UUID);
+    assert!(secrets.refresh_token.is_empty());
+
+    data["activeAccountLocalId"] = json!("official-other");
+    std::fs::write(&path, data.to_string()).unwrap();
+    let (again, _) = fresh(&ep, "", &account, secrets).unwrap();
+    assert_eq!(again, account);
+    assert_eq!(m.lock().unwrap().log.len(), 4);
+    assert!(m
+        .lock()
+        .unwrap()
+        .log
+        .iter()
+        .all(|(method, _, _)| method == "GET"));
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn official_blank_token_uses_a_valid_cached_token_until_its_saved_expiry() {
+    let path = std::env::temp_dir().join(format!(
+        "mcre-official-cached-import-{}.json",
+        std::process::id()
+    ));
+    let mut data: Value = serde_json::from_str(include_str!(
+        "../../tests/fixtures/official-launcher-accounts.json"
+    ))
+    .unwrap();
+    data["accounts"]["official-primary"]["accessToken"] = json!("");
+    std::fs::write(&path, data.to_string()).unwrap();
+    let (m, ep) = mock(|_| {});
+    let cached_expiry = now() + 7200;
+    let (account, secrets) =
+        existing::read_session_using(&ep, &path, None, Some(("mc-token", cached_expiry)), |_| {
+            None
+        })
+        .unwrap();
+    assert_eq!(account.uuid, UUID);
+    assert_eq!(secrets.minecraft_token, "mc-token");
+    assert_eq!(secrets.minecraft_expires_at, cached_expiry);
+
+    // The current launcher selection can change; the cached token stays with its saved UUID.
+    data["activeAccountLocalId"] = json!("official-other");
+    std::fs::write(&path, data.to_string()).unwrap();
+    let (same, _) = existing::read_session_using(
+        &ep,
+        &path,
+        Some(&account.uuid),
+        Some((&secrets.minecraft_token, secrets.minecraft_expires_at)),
+        |_| None,
+    )
+    .unwrap();
+    assert_eq!(same, account);
+    assert!(existing::read_session_using(
+        &ep,
+        &path,
+        Some(&account.uuid),
+        Some((&secrets.minecraft_token, now().saturating_sub(1))),
+        |_| None,
+    )
+    .unwrap_err()
+    .contains("session has expired"));
+    assert_eq!(m.lock().unwrap().log.len(), 4);
+    std::fs::remove_file(&path).unwrap();
+
+    let path = std::env::temp_dir().join(format!(
+        "mcre-official-profile-mismatch-{}.json",
+        std::process::id()
+    ));
+    let mut data: Value = serde_json::from_str(include_str!(
+        "../../tests/fixtures/official-launcher-accounts.json"
+    ))
+    .unwrap();
+    data["accounts"]["official-primary"]["accessToken"] = json!("");
+    data["activeAccountLocalId"] = json!("official-primary");
+    std::fs::write(&path, data.to_string()).unwrap();
+    let (_, ep) = mock(|m| m.profile_uuid = Some("00000000000000000000000000000001".into()));
+    assert!(existing::read_session_using(
+        &ep,
+        &path,
+        None,
+        Some(("mc-token", now() + 7200)),
+        |_| None,
+    )
+    .unwrap_err()
+    .contains("different Minecraft account"));
     std::fs::remove_file(path).unwrap();
 }

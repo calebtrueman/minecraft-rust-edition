@@ -19,7 +19,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub const SERVICE: &str = "io.github.calebtrueman.minecraft-rust-edition";
 const SCOPE: &str = "XboxLive.signin offline_access";
 pub const NOT_CONFIGURED: &str =
-    "Use an existing Prism Launcher session, or configure an approved Microsoft app ID for direct sign-in. Single player and offline servers work without an account.";
+    "Import an existing Minecraft Launcher or Prism session, or configure an approved Microsoft app ID for direct sign-in. Single player and offline servers work without an account.";
 const SIGN_IN_AGAIN: &str = "Your Microsoft sign-in expired. Sign in again.";
 /// The Minecraft token is renewed when it has less than this left.
 const RENEW_BEFORE: u64 = 3600;
@@ -490,7 +490,12 @@ pub fn fresh(
     secrets: Secrets,
 ) -> Result<(Account, Secrets), String> {
     if let Some(path) = &secrets.imported_from {
-        return existing::read_session(ep, path, Some(&account.uuid));
+        return existing::read_session_with_cached(
+            ep,
+            path,
+            Some(&account.uuid),
+            Some((&secrets.minecraft_token, secrets.minecraft_expires_at)),
+        );
     }
     if secrets.minecraft_expires_at > now() + RENEW_BEFORE {
         return Ok((account.clone(), secrets));
@@ -735,8 +740,12 @@ pub fn session_for_launch(
         client_id().ok_or(NOT_CONFIGURED)?
     };
     let before = secrets.minecraft_token.clone();
+    let before_expires_at = secrets.minecraft_expires_at;
     let (renewed, secrets) = fresh(ep, &client_id, &account, secrets)?;
-    if renewed != account || secrets.minecraft_token != before {
+    if renewed != account
+        || secrets.minecraft_token != before
+        || secrets.minecraft_expires_at != before_expires_at
+    {
         accounts.add(store, renewed.clone(), &secrets)?;
         accounts.save()?;
     }

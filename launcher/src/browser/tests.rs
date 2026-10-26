@@ -383,8 +383,14 @@ fn live_modrinth_search_pick_and_download() {
 }
 
 #[test]
-fn curseforge_is_coming_soon_and_never_searched() {
-    let ids: Vec<SourceId> = sources().iter().map(|s| s.id()).collect();
-    assert_eq!(ids, [SourceId::Modrinth, SourceId::Horizon]);
+fn upstream_registry_is_disabled_by_default_and_only_enabled_explicitly() {
+    let default_ids: Vec<SourceId> = sources_with_registry(false)
+        .iter()
+        .map(|s| s.id())
+        .collect();
+    assert_eq!(default_ids, [SourceId::Modrinth]);
+    let developer_ids: Vec<SourceId> = sources_with_registry(true).iter().map(|s| s.id()).collect();
+    assert_eq!(developer_ids, [SourceId::Modrinth, SourceId::Horizon]);
+    assert!(source_with_registry(SourceId::Horizon, false).is_none());
     assert!(source(SourceId::CurseForge).is_none());
 }

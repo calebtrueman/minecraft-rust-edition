@@ -379,7 +379,7 @@ impl Launcher {
             .gap(px(16.))
             .child(text(theme::HEADING).text_color(t.ink).child("Data collection"))
             .child(text(theme::UI).max_w(px(600.)).text_color(t.muted).child(
-                "Each switch is off unless you turn it on. What it sends is below it; the privacy page on playhorizon.dev says how long it is kept.",
+                "Each switch is off unless you turn it on. The details and a preview of what would be sent are below.",
             ))
             .child(list)
             .child(text(theme::CAPTION).text_color(t.muted).child(telemetry::NEVER))

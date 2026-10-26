@@ -34,19 +34,24 @@ const RATINGS_URL: &str = "https://playhorizon.dev/api/mods/ratings";
 /// The launcher has no GitHub account of its own.
 const RATE: &str = "https://playhorizon.dev/api/mods/auth/login?back=/mods/";
 
-/// Where the index comes from: `HORIZON_MOD_INDEX` (a file or an `https://` address, for a
-/// test registry), else [`INDEX_URL`].
+/// The fork does not use the upstream registry unless a developer supplies an index.
 fn location() -> String {
     std::env::var("HORIZON_MOD_INDEX")
         .ok()
         .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| INDEX_URL.to_owned())
+        .unwrap_or_default()
+}
+
+/// Whether a developer explicitly enabled a registry for local testing.
+pub fn enabled() -> bool {
+    !location().is_empty()
 }
 
 /// True when the index is a local file: its files may then be local too (`file://`), for
 /// trying a registry out before it is published.
 pub fn local() -> bool {
-    !location().starts_with("https://")
+    let at = location();
+    !at.is_empty() && !at.starts_with("https://")
 }
 
 static LOADED: Mutex<Option<(Instant, Arc<Index>)>> = Mutex::new(None);
@@ -63,6 +68,11 @@ pub fn known_index() -> Option<Arc<Index>> {
 /// The index: the one fetched in the last ten minutes, else fetched again (and kept in the game
 /// folder), else the copy kept last time.
 pub fn index() -> Result<Arc<Index>, String> {
+    if !enabled() {
+        return Err(
+            "The inherited mod registry is disabled in this fork. Set HORIZON_MOD_INDEX to use a development registry.".into(),
+        );
+    }
     if let Some((at, index)) = LOADED.lock().unwrap().as_ref() {
         if at.elapsed() < FRESH {
             return Ok(index.clone());
@@ -94,6 +104,11 @@ pub fn index() -> Result<Arc<Index>, String> {
 fn fetch_index() -> Result<(Index, String), String> {
     use std::io::Read;
     let at = location();
+    if at.is_empty() {
+        return Err(
+            "The inherited mod registry is disabled in this fork. Set HORIZON_MOD_INDEX to use a development registry.".into(),
+        );
+    }
     let text = if at.starts_with("https://") {
         let response = download::agent(&at).get(&at).call().map_err(|e| match e {
             ureq::Error::Status(code, _) => format!("The mod registry answered {code}."),

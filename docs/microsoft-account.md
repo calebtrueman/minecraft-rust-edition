@@ -1,42 +1,53 @@
 # Existing launcher sessions in this fork
 
-Use **Settings → Existing Minecraft account → Use Prism account** to read the active Prism
-Minecraft session. A custom accounts.json can be selected with
-`horizon-launcher account import /path/to/accounts.json`.
+Use **Settings → Existing Minecraft account → Import launcher session** to import an existing
+Minecraft session. By default, Minecraft: Rust Edition reads the official Minecraft Launcher's
+`launcher_accounts.json`; it checks Prism's `accounts.json` only when the official file is absent.
+Choose either file directly with `horizon-launcher account import /path/to/account-file.json`.
 
-The import takes only the Minecraft token, expiry and profile ID from that file. It checks ownership and the
-profile through Minecraft's HTTPS service, then keeps its own copy in this app's keychain entry
-(or memory if no keychain is available). It never imports Microsoft refresh tokens or app IDs.
-Before each launch it reads the same profile from the source again. Expired sessions require a
-fresh online launch through Prism. It does not edit the source launcher or start Java gameplay.
-The official launcher's private account storage is not supported.
+The import takes only the Minecraft token, its expiry and profile ID. It checks ownership and the
+profile through Minecraft's HTTPS service, then keeps its own copy in this app's keychain entry (or
+memory if no keychain is available). It never imports Microsoft refresh tokens or app IDs, and it
+never reads `launcher_msa_credentials.bin`. Before each launch it reads the same profile from the
+source again. If the official launcher's token field is blank, macOS can read the matching token
+from a running Minecraft game; its `--uuid` must match the saved profile ID. Only that token is
+copied; the full process arguments are never saved or shown. After import, Minecraft: Rust Edition
+can reuse the saved Minecraft token until it expires, even after the game closes. Each use checks
+ownership and the profile with Minecraft's service again. If no keychain is available, the saved
+token only lasts until the launcher closes. On other systems, the official launcher must provide a
+non-empty token for the first import.
+
+If the official account file exists but has an expired or unusable session, Minecraft: Rust Edition
+shows that error instead of quietly switching to a Prism account. To use Prism in that case, choose
+its file with the command above. The importer does not edit the source launcher or start Java
+gameplay.
 
 This path avoids registering a new app for an already valid Minecraft session. Direct Microsoft
-sign-in still needs an approved app ID. Live online-server compatibility is not yet verified.
+sign-in still needs an approved app ID.
 
 ---
 
 # Microsoft account sign-in and online-mode play
 
-Horizon signs players in with their Microsoft account in the launcher and joins online-mode
-(authenticated) servers like vanilla 26.3 does. Offline profiles and offline/LAN play stay exactly as
-they are. This note is the design, the status of each part and what Ludovic has to register.
+Minecraft: Rust Edition can sign players in with their Microsoft account in the launcher and join
+online-mode (authenticated) servers like vanilla 26.3 does. Offline profiles and offline/LAN play
+stay exactly as they are. This note covers the sign-in design and its status.
 
-## What Ludovic registers (needs his accounts)
+## Direct sign-in setup
 
-Nothing below can be done by an agent: the app registrations belong to Ludovic. Until the client ID
-is set, the launcher's sign-in shows "Coming soon" ("Microsoft sign-in is coming soon") and everything else
-works as before.
+Direct Microsoft sign-in is optional. It needs a client ID registered for this fork and approved by
+Mojang. Importing a Minecraft Launcher or Prism session does not need that client ID.
 
 1. **Azure app registration** (https://portal.azure.com → Microsoft Entra ID → App registrations →
    New registration):
-   - Name: `Horizon` (shown to players on the Microsoft consent page).
+   - Name: `Minecraft: Rust Edition` (shown to players on the Microsoft consent page).
    - Supported account types: **Personal Microsoft accounts only** (Minecraft accounts are
      consumer accounts; the launcher uses the `consumers` tenant).
    - Redirect URI: none needed for the device-code flow. If the form insists, add a
      "Mobile and desktop applications" redirect `https://login.microsoftonline.com/common/oauth2/nativeclient`.
    - After creating it: Authentication → Advanced settings → **Allow public client flows: Yes**
-     (this enables the device-code flow; there is no client secret, Horizon is a public client).
+     (this enables the device-code flow; there is no client secret, Minecraft: Rust Edition is a
+     public client).
    - API permissions: none to add. The launcher requests the scopes `XboxLive.signin offline_access`
      at sign-in time; `offline_access` gives the refresh token.
    - Copy the **Application (client) ID** (a GUID).
@@ -44,8 +55,8 @@ works as before.
    `api.minecraftservices.com/authentication/login_with_xbox` (HTTP 403, "Invalid app registration")
    until Mojang approves them. Apply with the form linked from https://aka.ms/mce-reviewappid
    (Minecraft Java "App ID review"), giving the client ID above, the app name, the project URL
-   (https://github.com/ludovic111/horizon) and a short description ("open-source Minecraft Java
-   Edition client written in Rust; signs players in to join online-mode servers"). Approval takes
+   (https://github.com/calebtrueman/minecraft-rust-edition) and a short description ("open-source
+   Minecraft Java Edition client written in Rust; signs players in to join online-mode servers"). Approval takes
    days to weeks; sign-in fails at the Minecraft step with "This app is not approved by Mojang yet"
    until then.
 3. **Where the ID goes**:
@@ -91,8 +102,8 @@ one is selected. "Sign out" deletes the account's secrets from the keychain.
 
 - Secrets (the Microsoft refresh token, the Minecraft access token and its expiry) go to the OS
   keychain, one item per account: Keychain on macOS, Credential Manager on Windows, the Secret
-  Service (GNOME Keyring, KWallet) on Linux. Service name `dev.playhorizon.launcher`, account = the
-  Minecraft UUID.
+  Service (GNOME Keyring, KWallet) on Linux. Service name
+  `io.github.calebtrueman.minecraft-rust-edition`, account = the Minecraft UUID.
 - `accounts.json` in the launcher's data folder keeps only public data: UUID, name, skin URL, which
   account is selected. Never a token.
 - No keychain available (a Linux box without a Secret Service, a locked keychain): sign-in still
@@ -104,7 +115,7 @@ one is selected. "Sign out" deletes the account's secrets from the keychain.
 ## Handing the session to the game
 
 Vanilla's launcher passes `--accessToken <token>` on the command line, where every user of the
-machine can read it in the process list. Horizon keeps it out of argv:
+machine can read it in the process list. Minecraft: Rust Edition keeps it out of argv:
 
 - The launcher writes `session-<random>.json` (mode 0600 on Unix, created new, in the game home's
   `sessions/` folder) with `{"name", "uuid", "access_token", "user_type": "msa", "xuid"}` and starts
@@ -132,9 +143,9 @@ Vanilla's `ClientHandshakePacketListenerImpl.handleHello`, `Crypt` and authlib's
    game and the launcher)", `InsufficientPrivilegesException` → "Multiplayer is disabled…",
    `multiplayer.access.banned` / `FORCED_USERNAME_CHANGE` → "You are banned from playing online",
    5xx or no network → "The authentication servers are currently not reachable…". Without a session
-   the game says "This server is in online mode. Sign in with your Microsoft account in the Horizon
-   launcher to join it." (Vanilla goes on after a failed join on LAN-discovered servers, which then
-   refuse the player anyway; Horizon stops at once.)
+   the game says "This server is in online mode. Sign in with your Microsoft account in the
+   Minecraft: Rust Edition launcher to join it." (Vanilla goes on after a failed join on
+   LAN-discovered servers, which then refuse the player anyway; Minecraft: Rust Edition stops at once.)
 5. Send `ServerboundKeyPacket` (the secret and the challenge, each RSA PKCS#1 v1.5 encrypted with
    the server key), then AES/CFB8 (key = IV = the secret) both ways.
 
@@ -142,12 +153,12 @@ The connecting screen follows vanilla's states: "Connecting to the server..." un
 request, "Logging in..." while joining the session service, "Encrypting...", then "Joining world...".
 Code: `horizon-protocol` (`rsa.rs`, `crypto::server_hash`), `horizon-client` (`auth.rs`, `net.rs`).
 
-Horizon's own dedicated and LAN servers stay offline-mode (they don't verify players with the
-session service); that is separate work.
+Minecraft: Rust Edition's own dedicated and LAN servers stay offline-mode (they don't verify
+players with the session service); that is separate work.
 
 `HORIZON_API_DISCOVERY` overrides the discovery URL, the counterpart of authlib's
-`-Dminecraft.api.discovery.host`; it is how the harness points both the vanilla server and Horizon at
-a local mock.
+`-Dminecraft.api.discovery.host`; it is how the harness points both the vanilla server and
+Minecraft: Rust Edition at a local mock.
 
 ## Skins and capes (part b)
 
@@ -161,19 +172,19 @@ player renderer. Until a skin arrives the default skin for the UUID shows (as to
 
 ## Chat signing (part d)
 
-26.3's dedicated servers default to `enforce-secure-profile=true`. A client without a chat session
-can join and play, but every chat message and signed command argument is refused with "Chat
-disabled due to missing profile public key. Please try reconnecting." (`SignedMessageChain.Decoder.unsigned`).
-To chat on such servers the game will:
+26.3's dedicated servers default to `enforce-secure-profile=true`. The remote client now fetches a
+profile certificate from Minecraft Services after an online login, without holding up world entry.
+It sends the chat session update after the server's play-login packet, signs player chat and each
+signable command message argument with SHA256withRSA, and tracks the rolling last-seen window. It
+sends a separate acknowledgement after every 20 signed messages when the player has not sent a chat
+packet in that time. RSA private-key signatures use `ring`; the account token and private key stay
+in memory.
 
-- fetch the profile key pair from the services `player/getCertificates` endpoint (Minecraft token);
-- send `ServerboundChatSessionUpdatePacket` (random session UUID, key expiry, public key, Mojang's
-  key signature) after joining;
-- sign each chat message and signable command argument with SHA256withRSA over vanilla's
-  `SignedMessageBody` layout and keep the last-seen message tracker and acknowledgements.
-
-Until part d lands, Horizon joins online servers but chat works only where
-`enforce-secure-profile=false` (or the server can't validate keys).
+If certificate lookup fails or the certificate expires, Minecraft: Rust Edition keeps the
+connection open and sends unsigned chat. Servers with secure-profile enforcement will refuse that
+chat. Commands without signable message arguments can still be sent without argument signatures.
+This flow has unit and network-packet coverage, but it has not been checked against a live account
+or public server.
 
 ## Harnesses
 
@@ -181,8 +192,8 @@ Until part d lands, Horizon joins online servers but chat works only where
 services (discovery document, `join`, `hasJoined`/`verify`, no public keys) and a vanilla 26.3
 dedicated server in online mode started with `-Dminecraft.api.discovery.host=<mock>` (authlib
 10.0.77's only override: it replaces the whole discovery URL; the old `minecraft.api.session.host`
-style properties are gone). Horizon's
-headless client (`HORIZON_NET_REPORT`) joins with a session file holding a mock token: the server
+style properties are gone). The Minecraft: Rust Edition headless client (`HORIZON_NET_REPORT`)
+joins with a session file holding a mock token: the server
 verifies the join through the mock with the hash it computed itself (so the RSA wrapping, the hash
 and AES/CFB8 are all checked against vanilla's code), the player spawns, chats and runs `/list`.
 Negative cases: a token the mock rejects (the client must show vanilla's "Invalid session" message)
@@ -192,14 +203,3 @@ Rust unit tests: server hash vectors (Notch, jeb_, simon), RSA wrapping round tr
 X.509 key parsing, AES/CFB8 vectors (already in `horizon-protocol`), the session file (permissions,
 age, deletion), the error mapping. Launcher: the whole token chain against a local mock of the
 Microsoft, Xbox and Minecraft endpoints, and the keychain abstraction with an in-memory backend.
-
-## PR plan
-
-- (a) Game: online-mode handshake, encryption, session join, session file, harness (15/15 checks
-  against vanilla 26.3 on macOS).
-- (c) Launcher: device-code sign-in, token chain, keychain, accounts UI, CLI/MCP (`account list`,
-  `account sign-in`, `account sign-out`, never tokens), session file handoff.
-- (b) Game: skins and capes over HTTPS, the real names and skins in game.
-- (d) Game: chat signing (profile keys, chat session, signed messages and commands).
-
-Each part ships on its own: online mode needs a session, which only (c) creates.

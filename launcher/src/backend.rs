@@ -82,6 +82,24 @@ const CLIENT: &str = if cfg!(windows) {
     "horizon-client"
 };
 
+const PREPARER: &str = if cfg!(windows) {
+    "horizon-prepare.exe"
+} else {
+    "horizon-prepare"
+};
+
+const CONTROL: &str = if cfg!(windows) {
+    "horizon-ctl.exe"
+} else {
+    "horizon-ctl"
+};
+
+const SERVER: &str = if cfg!(windows) {
+    "horizon-server.exe"
+} else {
+    "horizon-server"
+};
+
 /// The agent `url` is fetched with: the launcher's own user agent, through the player's proxy when
 /// one is set (`proxy`).
 fn agent(url: &str) -> ureq::Agent {
@@ -591,6 +609,192 @@ pub fn install(release: &Release, progress: impl Fn(f32)) -> Result<(), String> 
     reuse_prepared(&root, tag);
     complete_assets(tag);
     progress(1.0);
+    Ok(())
+}
+
+/// Copies a locally built game package into the launcher's private version folder. This is an
+/// explicit path for source builds; it never treats an unsigned local build as a downloaded
+/// release or changes the signing checks used for updates.
+pub fn install_local(source: &Path, tag: &str) -> Result<String, String> {
+    let versions = versions_dir();
+    install_local_into(source, tag, &versions)?;
+    reuse_prepared(&versions, tag);
+    let mut settings = Settings::load();
+    settings.selected = Some(tag.to_owned());
+    settings.save();
+    Ok(tag.to_owned())
+}
+
+/// The local tag namespace is separate from published `v…` versions and cannot contain path
+/// separators or hidden directory names.
+fn valid_local_tag(tag: &str) -> bool {
+    let Some(suffix) = tag.strip_prefix("local-") else {
+        return false;
+    };
+    let mut chars = suffix.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+fn install_local_into(source: &Path, tag: &str, versions: &Path) -> Result<(), String> {
+    if !valid_local_tag(tag) {
+        return Err("Local builds need a tag like local-source or local-ci.".into());
+    }
+    let source = fs::canonicalize(source)
+        .map_err(|e| format!("Could not open local package {}: {e}", source.display()))?;
+    if !source.is_dir() {
+        return Err(format!(
+            "{} is not a local package folder.",
+            source.display()
+        ));
+    }
+    validate_local_package(&source)?;
+
+    let planned_versions = canonical_future_path(versions)?;
+    if source.starts_with(&planned_versions) || planned_versions.starts_with(&source) {
+        return Err("The local package and launcher install folders must be separate.".into());
+    }
+    fs::create_dir_all(versions).map_err(|e| e.to_string())?;
+    let versions = fs::canonicalize(versions).map_err(|e| e.to_string())?;
+    // Recheck the real folders after creation. The preflight check keeps ordinary bad paths from
+    // creating anything inside a package; this also catches a symlink changed between checks.
+    if source.starts_with(&versions) || versions.starts_with(&source) {
+        return Err("The local package and launcher install folders must be separate.".into());
+    }
+
+    let target = versions.join(tag);
+    if fs::symlink_metadata(&target).is_ok() {
+        return Err(format!(
+            "{tag} is already installed; remove it before importing it again."
+        ));
+    }
+    static STAGES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let stage = versions.join(format!(
+        ".{tag}.partial-{}-{}",
+        std::process::id(),
+        STAGES.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    fs::create_dir(&stage).map_err(|e| format!("Could not prepare the install folder: {e}"))?;
+
+    let result = (|| {
+        copy_local_tree(&source, &stage)
+            .map_err(|e| format!("Could not copy local package: {e}"))?;
+        fs::write(stage.join(COMPLETE), b"").map_err(|e| e.to_string())?;
+        fs::rename(&stage, &target).map_err(|e| format!("Could not finish local install: {e}"))
+    })();
+    if result.is_err() {
+        let _ = fs::remove_dir_all(&stage);
+    }
+    result
+}
+
+/// Resolves the existing part of a path and appends its not-yet-created tail. This lets the
+/// overlap check run before creating anything inside a package folder.
+fn canonical_future_path(path: &Path) -> Result<PathBuf, String> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|e| e.to_string())?
+            .join(path)
+    };
+    let mut resolved = PathBuf::new();
+    let mut missing = 0usize;
+    for component in absolute.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if missing > 0 {
+                    resolved.pop();
+                    missing -= 1;
+                } else if resolved.is_dir() {
+                    resolved.pop();
+                } else {
+                    return Err(format!(
+                        "Could not resolve install folder {}.",
+                        path.display()
+                    ));
+                }
+            }
+            std::path::Component::Prefix(_) | std::path::Component::RootDir => {
+                resolved.push(component.as_os_str());
+            }
+            std::path::Component::Normal(name) if missing > 0 => {
+                resolved.push(name);
+                missing += 1;
+            }
+            std::path::Component::Normal(name) => {
+                let next = resolved.join(name);
+                match fs::symlink_metadata(&next) {
+                    Ok(_) => resolved = fs::canonicalize(&next).map_err(|e| e.to_string())?,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        resolved.push(name);
+                        missing = 1;
+                    }
+                    Err(error) => return Err(format!("{}: {error}", next.display())),
+                }
+            }
+        }
+    }
+    Ok(resolved)
+}
+
+fn validate_local_package(source: &Path) -> Result<(), String> {
+    for file in [CLIENT, PREPARER, CONTROL, SERVER, "research-lock.json"] {
+        if !source.join(file).is_file() {
+            return Err(format!(
+                "This is not a complete local game package: {} is missing.",
+                source.join(file).display()
+            ));
+        }
+    }
+    let lock_path = source.join("research-lock.json");
+    let lock = read_json(&lock_path)
+        .ok_or_else(|| format!("{} is not valid JSON.", lock_path.display()))?;
+    let version = lock["minecraft"]["version"].as_str();
+    if version != Some(horizon_core::VANILLA_VERSION) {
+        return Err(format!(
+            "This launcher supports local packages for Minecraft {}, but this package pins {}.",
+            horizon_core::VANILLA_VERSION,
+            version.unwrap_or("no Minecraft version")
+        ));
+    }
+    for folder in [
+        "crates/horizon-prepare/src",
+        "mods/horizon/src/test/java/dev/horizonlab/parity",
+        "tools",
+    ] {
+        if !source.join(folder).is_dir() {
+            return Err(format!(
+                "This is not a complete local game package: {} is missing.",
+                source.join(folder).display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Copies package files and directories only. Refusing links and special files keeps an imported
+/// package inside the launcher's private folder.
+fn copy_local_tree(source: &Path, destination: &Path) -> std::io::Result<()> {
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let kind = entry.file_type()?;
+        let to = destination.join(entry.file_name());
+        if kind.is_dir() {
+            fs::create_dir(&to)?;
+            copy_local_tree(&entry.path(), &to)?;
+        } else if kind.is_file() {
+            fs::copy(entry.path(), to)?;
+        } else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("{} is not a regular file or folder", entry.path().display()),
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -2597,6 +2801,113 @@ mod java_tests;
 mod tests {
     use super::*;
     use std::cmp::Ordering::*;
+
+    fn local_package_fixture(root: &Path) -> PathBuf {
+        let package = root.join("package");
+        let write = |relative: &str, bytes: &[u8]| {
+            let path = package.join(relative);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, bytes).unwrap();
+        };
+        for binary in [CLIENT, PREPARER, CONTROL, SERVER] {
+            write(binary, b"native build");
+        }
+        write("research-lock.json", br#"{"minecraft":{"version":"26.3"}}"#);
+        write("crates/horizon-prepare/src/lib.rs", b"preparer sources");
+        write(
+            "mods/horizon/src/test/java/dev/horizonlab/parity/VanillaHeightmapOracle.java",
+            b"exporter sources",
+        );
+        write("tools/prepare_native_client.py", b"preparer helper");
+        package
+    }
+
+    #[test]
+    fn local_package_installs_to_a_separate_tag_and_keeps_the_source_untouched() {
+        let root = std::env::temp_dir().join(format!(
+            "minecraft-rust-edition-local-install-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let package = local_package_fixture(&root);
+        let versions = root.join("launcher/versions");
+
+        install_local_into(&package, "local-ci", &versions).unwrap();
+
+        let installed = versions.join("local-ci");
+        assert!(installed.join(COMPLETE).is_file());
+        assert_eq!(fs::read(installed.join(CLIENT)).unwrap(), b"native build");
+        assert!(installed
+            .join("mods/horizon/src/test/java/dev/horizonlab/parity/VanillaHeightmapOracle.java")
+            .is_file());
+        assert!(!package.join(COMPLETE).exists());
+
+        let original = fs::read(installed.join(CLIENT)).unwrap();
+        fs::write(package.join(CLIENT), b"new native build").unwrap();
+        assert!(install_local_into(&package, "local-ci", &versions)
+            .unwrap_err()
+            .contains("already installed"));
+        assert_eq!(fs::read(installed.join(CLIENT)).unwrap(), original);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn local_install_rejects_release_tags_and_path_shaped_tags() {
+        for tag in ["v1.2.3", "local-", "local-../escape", "local-MyBuild"] {
+            assert!(!valid_local_tag(tag), "accepted {tag}");
+        }
+        assert!(valid_local_tag("local-source-7"));
+    }
+
+    #[test]
+    fn local_install_rejects_symlinks_and_mismatched_game_versions() {
+        let root = std::env::temp_dir().join(format!(
+            "minecraft-rust-edition-local-validation-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let package = local_package_fixture(&root);
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink("outside", package.join("linked-file")).unwrap();
+            let error =
+                install_local_into(&package, "local-symlink", &root.join("versions")).unwrap_err();
+            assert!(error.contains("regular file or folder"));
+        }
+        let _ = fs::remove_file(package.join("linked-file"));
+        fs::write(
+            package.join("research-lock.json"),
+            br#"{"minecraft":{"version":"26.2"}}"#,
+        )
+        .unwrap();
+        let error = install_local_into(&package, "local-wrong-version", &root.join("versions"))
+            .unwrap_err();
+        assert!(error.contains("supports local packages for Minecraft 26.3"));
+        assert!(!root.join("versions/local-wrong-version").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_install_resolves_symlinks_before_parent_components() {
+        let root = std::env::temp_dir().join(format!(
+            "minecraft-rust-edition-local-path-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let package = local_package_fixture(&root);
+        fs::create_dir_all(package.join("sub")).unwrap();
+        std::os::unix::fs::symlink(package.join("sub"), root.join("alias")).unwrap();
+
+        let versions = root.join("alias/../versions");
+        let error = install_local_into(&package, "local-overlap", &versions).unwrap_err();
+        assert!(error.contains("must be separate"));
+        assert!(!package.join("versions").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
 
     /// The game program's mod API level is its mark's; a program from before the mark (0.2.68
     /// and older) or none at all serves level 0.

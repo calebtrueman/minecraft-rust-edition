@@ -6,7 +6,7 @@ Every command of `horizon-launcher`, and the tool `horizon-launcher mcp` offers 
 
 ## `horizon-launcher versions`
 
-List Horizon releases, or the installed versions.
+List available releases, or the installed versions.
 
     horizon-launcher versions
 
@@ -23,6 +23,17 @@ Download and install a release (a tag such as v2026.10.13, or "latest").
 - `TAG`
 
 MCP: `install`.
+
+## `horizon-launcher install-local`
+
+Install a complete package built from source; the tag must start with `local-`.
+
+    horizon-launcher install-local <PACKAGE>
+
+- `PACKAGE`: The folder made by `cargo run -p xtask -- package-source`
+- `--tag`: A private label, separate from published versions
+
+MCP: `install_local`.
 
 ## `horizon-launcher remove`
 
@@ -80,7 +91,7 @@ MCP: `notes`.
 
 ## `horizon-launcher links`
 
-Show the Discord, sponsor and website links.
+Show project links that are configured.
 
     horizon-launcher links
 
@@ -101,6 +112,16 @@ Sign in with a Microsoft account in your browser (device code).
     horizon-launcher account sign-in
 
 MCP: `account_sign_in`.
+
+## `horizon-launcher account import`
+
+Import a Minecraft Launcher or Prism session; never copies Microsoft tokens.
+
+    horizon-launcher account import [PATH]
+
+- `PATH`: Optional path to launcher_accounts.json or Prism accounts.json
+
+MCP: `account_import`.
 
 ## `horizon-launcher account sign-out`
 
@@ -164,7 +185,7 @@ MCP: `logs`.
 
 ## `horizon-launcher update`
 
-Look for a newer Horizon release and launcher, and install them.
+Look for a newer game or launcher release, and install it.
 
     horizon-launcher update
 
@@ -174,7 +195,7 @@ MCP: `update`.
 
 ## `horizon-launcher desktop-entry`
 
-Linux: put Horizon in the applications menu (an entry and the icon, under $XDG_DATA_HOME), or take it out with --remove.
+Linux: put Minecraft: Rust Edition in the applications menu (an entry and icon, under $XDG_DATA_HOME), or take it out with --remove.
 
     horizon-launcher desktop-entry
 
@@ -316,26 +337,26 @@ MCP: `mods_list`.
 
 ## `horizon-launcher mods search`
 
-Search for packs Horizon loads.
+Search for resource packs and modpacks.
 
     horizon-launcher mods search [TEXT]...
 
 - `TEXT`
 - `--kind` (mod, resource, modpack, shader)
 - `--everything`: Also what was made for other versions or runs only partly, each marked
-- `--source` (modrinth, curseforge, horizon)
+- `--source` (modrinth, dev-registry)
 
 MCP: `mods_search`.
 
 ## `horizon-launcher mods check`
 
-Say how well a Java mod runs in Horizon: its jar is downloaded (checksum checked), carried over and read; the answer is kept.
+Check which files from a Java mod can be carried into the Rust game; the mod code cannot run.
 
     horizon-launcher mods check <PROJECT>
 
 - `PROJECT`
 - `--everything`: Allow a version made for another Minecraft version (1.21 and later)
-- `--source` (modrinth, curseforge, horizon)
+- `--source` (modrinth, dev-registry)
 
 MCP: `mods_check`.
 
@@ -347,7 +368,7 @@ Install a pack and what it needs, by its id or slug (checksums checked); a Java 
 
 - `PROJECT`
 - `--everything`: Allow a version made for another Minecraft version
-- `--source` (modrinth, curseforge, horizon)
+- `--source` (modrinth, dev-registry)
 
 MCP: `mods_install`.
 

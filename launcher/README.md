@@ -6,15 +6,18 @@ It reads an existing Minecraft session and checks it with Minecraft's service. I
 launch Minecraft through Prism while online, then retry here. Gameplay here stays in Rust.
 Java/Fabric mod code is not supported. No fork release has been published yet.
 
-The notes below describe the upstream launcher; some names and release links still refer to it.
+To install a build made from this source, follow [the source-build steps](../docs/source-builds.md).
+After unpacking the package, run `horizon-launcher install-local . --tag local-test`.
+The launcher copies that build into its own data folder and selects it. Prepare it from
+your Minecraft Java installation, then press Play or run `horizon-launcher play`.
 
 ---
 
-# Horizon launcher
+# Inherited launcher features
 
-A small desktop app that installs Horizon builds, prepares them from your own copy of
-Minecraft, and starts the client or a dedicated server. Built with [GPUI](https://www.gpui.rs),
-Zed's UI framework; it has its own Cargo workspace and is not part of the game's builds.
+The launcher installs game builds, prepares them from your own copy of Minecraft, and starts
+the client or a dedicated server. This page keeps the inherited feature notes; some options
+remain unavailable in the fork. It is built with [GPUI](https://www.gpui.rs), Zed's UI framework.
 
 ![Play](docs/play.png)
 
@@ -24,8 +27,8 @@ The opening, then Play ([clip](docs/opening.webm)):
 
 ## What it does
 
-- **Versions**: lists the published releases of ludovic111/horizon, installs the build for
-  this platform into its own folder, and removes it again.
+- **Versions**: lists this fork's published releases and installed builds. No fork release has
+  been published yet; use `install-local` with a source-built package in the meantime.
 - **Play**: prepares resources as `PLAY.txt` describes (your launcher's 26.3 install, the
   26.3 server jar from that version's own json, and Java 25) and copies its sounds from your
   launcher's asset store (`horizon-prepare sounds`; a launcher install without them only
@@ -36,9 +39,9 @@ The opening, then Play ([clip](docs/opening.webm)):
   preparation reuses checksum-verified game jars and libraries from the current
   or another installed Horizon version, so the original Minecraft install is
   only required when no valid imported copy exists.
-- **Mods**: search Modrinth (CurseForge support is coming soon) for resource
+- **Mods**: search Modrinth for resource
   packs and modpacks, each marked Works, Partly or Doesn't run in
-  Horizon; Java mod jars are never offered. Install puts a pack and what it needs in
+  Minecraft: Rust Edition; Java mod jars are checked but do not run in the Rust game. Install puts a pack and what it needs in
   `resourcepacks/` only after its SHA-512 matches, and a
   modpack goes to the Modpacks page; installed packs show their source and checksum, with Update
   and Remove ([docs/mod-browser.md](../docs/mod-browser.md)).
@@ -160,16 +163,17 @@ and PowerShell don't wait for a windowed program: they show the prompt again bef
 and don't set `%ERRORLEVEL%` / `$LASTEXITCODE`. Scripts that need the exit code use
 `start /wait horizon-launcher …` or `Start-Process -Wait`, or read its output through a pipe.
 
-    horizon-launcher versions [--installed]       releases on GitHub, or what is installed (* = selected)
+    horizon-launcher versions [--installed]       fork releases, or what is installed (* = selected)
     horizon-launcher install <tag|latest>
+    horizon-launcher install-local <package> [--tag local-build]
     horizon-launcher remove <tag>
     horizon-launcher prepare [--minecraft <dir>] [--version <tag>]
     horizon-launcher play [--version <tag>] [--arg <ARG>]...   start the client; --arg passes an extra argument through (repeatable)
     horizon-launcher server [--dir <dir>] [--version <tag>] [--accept-eula]
     horizon-launcher notes [<tag>]                  patch notes as plain text
-    horizon-launcher links                          the Discord, sponsor and website links
+    horizon-launcher links                          configured project links
     horizon-launcher game-args [<line>]             show or set the extra arguments the game starts with
-    horizon-launcher update [--check]               Horizon and the launcher
+    horizon-launcher update [--check]               the game and launcher
     horizon-launcher logs [--lines N] [--crash]     the end of the game's log, or its newest crash report
     horizon-launcher account [list]                 the Microsoft accounts signed in (* = plays)
     horizon-launcher account sign-in                sign in in your browser with a code

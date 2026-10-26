@@ -71,7 +71,7 @@ impl SourceId {
         match self {
             SourceId::Modrinth => "Modrinth",
             SourceId::CurseForge => "CurseForge",
-            SourceId::Horizon => "Horizon",
+            SourceId::Horizon => "Dev registry",
         }
     }
 }
@@ -240,22 +240,32 @@ pub trait Source: Send + Sync {
     }
 }
 
-/// What the launcher says wherever CurseForge would be.
-pub const CURSEFORGE_SOON: &str = "CurseForge support is coming soon.";
-/// What another source answers for shader packs: Horizon's own are on its registry only.
-pub const SHADERS_ON_HORIZON: &str =
-    "Horizon's shader packs are on Horizon's registry: pick Horizon.";
+/// What another source answers for shader packs: this game does not currently use shader packs.
+pub const SHADERS_ON_HORIZON: &str = "Shader packs are unavailable in Minecraft: Rust Edition.";
 
-/// The sources this launcher uses: Modrinth and Horizon's registry. CurseForge support is coming
-/// soon: its API needs a paid key, so no search or install goes to it; `curseforge` is kept for
-/// then.
+/// The sources this fork uses by default. Its inherited registry is available only when a
+/// developer explicitly sets `HORIZON_MOD_INDEX`.
 pub fn sources() -> Vec<Box<dyn Source>> {
-    vec![Box::new(modrinth::Modrinth), Box::new(horizon::Registry)]
+    sources_with_registry(horizon::enabled())
+}
+
+fn sources_with_registry(enable_registry: bool) -> Vec<Box<dyn Source>> {
+    let mut sources: Vec<Box<dyn Source>> = vec![Box::new(modrinth::Modrinth)];
+    if enable_registry {
+        sources.push(Box::new(horizon::Registry));
+    }
+    sources
 }
 
 /// The source of that id, when this launcher can use it.
 pub fn source(id: SourceId) -> Option<Box<dyn Source>> {
-    sources().into_iter().find(|s| s.id() == id)
+    source_with_registry(id, horizon::enabled())
+}
+
+fn source_with_registry(id: SourceId, enable_registry: bool) -> Option<Box<dyn Source>> {
+    sources_with_registry(enable_registry)
+        .into_iter()
+        .find(|s| s.id() == id)
 }
 
 /// How well a project of `kind` made for `game_versions` and `loaders` runs in Horizon.

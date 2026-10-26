@@ -1,9 +1,6 @@
-//! The Mods page: search Horizon's own registry for mods made for Horizon, or Modrinth
-//! (CurseForge: coming soon) for Java mods, modpacks and resource packs, see where each comes
-//! from and how well it runs (a Java mod's jar is checked first; a Horizon mod says whether it is
-//! signed and what it may do), install it with its checksum checked, turn Horizon mods on and
-//! off, and update or remove what was installed (`horizon_launcher::browser`). Imported modpacks
-//! are listed on its Modpacks tab.
+//! The Mods page: search Modrinth for Java mods, modpacks and resource packs. Java mods are
+//! checked before install but do not run in the Rust game. A developer can explicitly enable the
+//! inherited registry with `HORIZON_MOD_INDEX`. Imported modpacks are listed on its Modpacks tab.
 use super::servers_page::{type_key, Key};
 use super::*;
 use horizon_launcher::browser::{
@@ -14,19 +11,27 @@ use horizon_port_pack::check::Check;
 use std::collections::HashMap;
 
 /// The kinds, as the Mods page's tabs: name and icon.
-const KINDS: [(PackKind, &str, &str); 4] = [
-    (PackKind::Mod, "Mods", "box"),
-    (PackKind::Modpack, "Modpacks", "archive"),
-    (PackKind::ResourcePack, "Resource packs", "image"),
-    (PackKind::Shader, "Shader packs", "zap"),
-];
+fn kinds() -> Vec<(PackKind, &'static str, &'static str)> {
+    let mut kinds = vec![
+        (PackKind::Mod, "Mods", "box"),
+        (PackKind::Modpack, "Modpacks", "archive"),
+        (PackKind::ResourcePack, "Resource packs", "image"),
+    ];
+    if horizon::enabled() {
+        kinds.push((PackKind::Shader, "Shader packs", "zap"));
+    }
+    kinds
+}
 /// Java mods checked at once.
 const CHECKING: usize = 2;
-/// The sources to pick from; CurseForge is shown beside them as coming soon.
-const SOURCES: [(SourceId, &str); 2] = [
-    (SourceId::Modrinth, "Modrinth"),
-    (SourceId::Horizon, "Rust mods"),
-];
+/// The sources to pick from; the inherited registry appears only for explicit developer setups.
+fn sources() -> Vec<(SourceId, &'static str)> {
+    let mut sources = vec![(SourceId::Modrinth, "Modrinth")];
+    if horizon::enabled() {
+        sources.push((SourceId::Horizon, "Dev registry"));
+    }
+    sources
+}
 const PAGE: usize = 20;
 
 pub(super) enum Event {
@@ -103,16 +108,16 @@ impl Mods {
         let page = std::env::var("HORIZON_LAUNCHER_PAGE");
         let kind = match page.as_deref() {
             Ok("modpacks") => PackKind::Modpack,
-            Ok("shaders") => PackKind::Shader,
+            Ok("shaders") if horizon::enabled() => PackKind::Shader,
+            Ok("shaders") => PackKind::ResourcePack,
             _ => PackKind::Mod,
         };
         Self {
             kind,
-            // `HORIZON_LAUNCHER_SOURCE=horizon` opens on Horizon's registry, for screenshots;
-            // shader packs are only there.
+            // The inherited registry needs an explicit `HORIZON_MOD_INDEX` developer setting.
             source: match std::env::var("HORIZON_LAUNCHER_SOURCE").as_deref() {
-                _ if kind == PackKind::Shader => SourceId::Horizon,
-                Ok("horizon") => SourceId::Horizon,
+                _ if kind == PackKind::Shader && horizon::enabled() => SourceId::Horizon,
+                Ok("horizon") if horizon::enabled() => SourceId::Horizon,
                 _ => SourceId::Modrinth,
             },
             text: String::new(),
@@ -635,18 +640,18 @@ impl Launcher {
         }
         let header = page_header(
             "Mods",
-            "Rust mods and resource packs. Fabric and other Java mod code does not run in the Rust game. Importing a pack can carry over supported data and assets; it does not preserve all of its mods.",
+            "Browse Modrinth for modpacks and resource packs. Fabric and other Java mod code does not run in this game. Importing a pack can carry over supported data and assets; it does not preserve all of its mods.",
             &t,
         );
         let this = cx.entity().downgrade();
-        let kinds = blocks::tabs("mods-kind", &KINDS, self.mods.kind, &t, {
+        let kinds = blocks::tabs("mods-kind", &kinds(), self.mods.kind, &t, {
             let this = this.clone();
             move |kind, _, cx| {
                 let _ = this.update(cx, |this, cx| {
                     if this.mods.kind != kind {
                         this.mods.kind = kind;
-                        // Horizon's own shader packs are on its registry only.
-                        if kind == PackKind::Shader {
+                        // Shader packs are available only through an explicitly enabled dev registry.
+                        if kind == PackKind::Shader && horizon::enabled() {
                             this.mods.source = SourceId::Horizon;
                         }
                         // Categories and loaders differ by kind.
@@ -676,10 +681,8 @@ impl Launcher {
                 this.mods_search(0);
                 cx.notify();
             }));
-        // CurseForge support is coming soon: shown, inert, never searched (like the Microsoft
-        // account's "Coming soon").
         let source_note = div().flex().child(self.mods_source_switch(cx));
-        // The registry lists only what was made for Horizon: no "everything", no Modrinth filters.
+        // The dev registry has its own results and does not use Modrinth filters.
         let registry = self.mods.source == SourceId::Horizon;
         let filters = (!registry).then(|| self.mods_filters(cx));
         let controls = div()
@@ -913,11 +916,11 @@ impl Launcher {
             let line = if m.searching || !m.searched {
                 "Searching…"
             } else if m.source == SourceId::Horizon {
-                "Nothing in Horizon's registry matches yet."
+                "Nothing in the dev registry matches yet."
             } else if m.everything {
                 "Nothing found."
             } else {
-                "Nothing found that runs in Horizon. Show everything lists the rest."
+                "Nothing found that runs in Minecraft: Rust Edition. Show everything lists the rest."
             };
             return centered(line, &t);
         }
@@ -1061,8 +1064,7 @@ impl Launcher {
 }
 
 impl Launcher {
-    /// The source switch: Modrinth or Horizon's registry, CurseForge shown as coming soon and not
-    /// clickable, like the Microsoft account's "Coming soon".
+    /// The source switch: Modrinth, plus a developer registry when explicitly enabled.
     fn mods_source_switch(&self, cx: &mut Context<Self>) -> Stateful<Div> {
         let this = cx.entity().downgrade();
         source_switch(&self.theme, self.mods.source, move |source, _, cx| {
@@ -1084,19 +1086,7 @@ fn source_switch(
     current: SourceId,
     on_pick: impl Fn(SourceId, &mut Window, &mut App) + Clone + 'static,
 ) -> Stateful<Div> {
-    let soon = div()
-        .flex()
-        .items_center()
-        .h(px(theme::SEGMENT))
-        .px(px(14.))
-        .pb(px(2.))
-        .opacity(theme::DISABLED)
-        .child(
-            blocks::pixel(14., FontWeight::MEDIUM)
-                .text_color(t.muted)
-                .child("CurseForge (coming soon)"),
-        );
-    segments("mods-source", &SOURCES, current, t, on_pick).child(soon)
+    segments("mods-source", &sources(), current, t, on_pick)
 }
 
 #[cfg(test)]

@@ -1,0 +1,30 @@
+{
+  "activeAccountLocalId": "official-primary",
+  "accounts": {
+    "official-primary": {
+      "type": "Xbox",
+      "minecraftProfile": {
+        "id": "069a79f444e94726a5befca90e38aaf5",
+        "name": "TestPlayer"
+      },
+      "accessToken": "mc-token",
+      "accessTokenExpiresAt": "2099-01-01T00:00:00Z",
+      "msa": {
+        "refreshToken": "microsoft-refresh-sentinel"
+      },
+      "msa-client-id": "microsoft-client-id-sentinel"
+    },
+    "official-other": {
+      "type": "Xbox",
+      "minecraftProfile": {
+        "id": "00000000000000000000000000000001",
+        "name": "OtherPlayer"
+      },
+      "accessToken": "other-mc-token",
+      "accessTokenExpiresAt": "2099-01-01T00:00:00Z",
+      "msa": {
+        "refreshToken": "another-microsoft-refresh-sentinel"
+      }
+    }
+  }
+}

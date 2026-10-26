@@ -11,7 +11,7 @@ use std::process::Command;
 #[command(
     name = "horizon-launcher",
     version = backend::VERSION,
-    about = "Installs, prepares and starts Horizon. Without a subcommand, opens the window."
+    about = "Installs, prepares and starts Minecraft: Rust Edition. Without a subcommand, opens the window."
 )]
 struct Cli {
     /// Print JSON instead of text, where a command has something to report
@@ -79,9 +79,9 @@ enum AccountCmd {
     List,
     /// Sign in with a Microsoft account in your browser (device code)
     SignIn,
-    /// Use the active Minecraft session from Prism Launcher; never copies Microsoft tokens
+    /// Import a Minecraft Launcher or Prism session; never copies Microsoft tokens
     Import {
-        /// Optional path to Prism Launcher accounts.json
+        /// Optional path to launcher_accounts.json or Prism accounts.json
         path: Option<PathBuf>,
     },
     /// Sign out: the account's tokens leave the keychain
@@ -164,7 +164,7 @@ enum ModpackCmd {
 enum ModsCmd {
     /// What the browser installed (the default)
     List,
-    /// Search for packs Horizon loads
+    /// Search for resource packs and modpacks
     Search {
         text: Vec<String>,
         #[arg(long, value_enum, default_value_t = KindArg::Resource)]
@@ -175,8 +175,7 @@ enum ModsCmd {
         #[arg(long, value_enum, default_value_t = SourceArg::Modrinth)]
         source: SourceArg,
     },
-    /// Say how well a Java mod runs in Horizon: its jar is downloaded (checksum checked),
-    /// carried over and read; the answer is kept
+    /// Check which files from a Java mod can be carried into the Rust game; the mod code cannot run
     Check {
         project: String,
         /// Allow a version made for another Minecraft version (1.21 and later)
@@ -215,17 +214,16 @@ enum KindArg {
     Mod,
     Resource,
     Modpack,
-    /// Horizon's own shader packs (Horizon's registry only)
+    /// Shader packs (requires an explicitly enabled development registry)
     Shader,
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
 enum SourceArg {
     Modrinth,
-    /// CurseForge support is coming soon
-    Curseforge,
-    /// Horizon's own registry: mods, modpacks and resource packs made for Horizon, reviewed
-    Horizon,
+    /// The inherited registry, enabled only when HORIZON_MOD_INDEX is set
+    #[value(alias = "horizon")]
+    DevRegistry,
 }
 
 impl SourceArg {
@@ -233,16 +231,20 @@ impl SourceArg {
         use horizon_launcher::browser::{self, SourceId};
         let id = match self {
             SourceArg::Modrinth => SourceId::Modrinth,
-            SourceArg::Curseforge => SourceId::CurseForge,
-            SourceArg::Horizon => SourceId::Horizon,
+            SourceArg::DevRegistry => {
+                if !horizon_launcher::browser::horizon::enabled() {
+                    return Err("The inherited mod registry is disabled in this fork. Set HORIZON_MOD_INDEX to use a development registry.".into());
+                }
+                SourceId::Horizon
+            }
         };
-        browser::source(id).ok_or_else(|| browser::CURSEFORGE_SOON.into())
+        browser::source(id).ok_or_else(|| format!("{} isn't available here.", id.label()))
     }
 }
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// List Horizon releases, or the installed versions
+    /// List available releases, or the installed versions
     Versions {
         /// Only the versions installed here (no network)
         #[arg(long)]
@@ -250,6 +252,14 @@ enum Cmd {
     },
     /// Download and install a release (a tag such as v2026.10.13, or "latest")
     Install { tag: String },
+    /// Install a complete package built from source; the tag must start with `local-`
+    InstallLocal {
+        /// The folder made by `cargo run -p xtask -- package-source`
+        package: PathBuf,
+        /// A private label, separate from published versions
+        #[arg(long, default_value = "local-source")]
+        tag: String,
+    },
     /// Remove an installed version
     Remove { tag: String },
     /// Prepare a version's resources from your own Minecraft install
@@ -293,7 +303,7 @@ enum Cmd {
     },
     /// Show a release's patch notes (default: the newest)
     Notes { tag: Option<String> },
-    /// Show the Discord, sponsor and website links
+    /// Show project links that are configured
     Links,
     /// Microsoft accounts: list them (the default), sign in, sign out, or pick the one that plays
     Account {
@@ -327,13 +337,13 @@ enum Cmd {
         #[arg(long)]
         crash: bool,
     },
-    /// Look for a newer Horizon release and launcher, and install them
+    /// Look for a newer game or launcher release, and install it
     Update {
         /// Only report what is available
         #[arg(long)]
         check: bool,
     },
-    /// Linux: put Horizon in the applications menu (an entry and the icon, under
+    /// Linux: put Minecraft: Rust Edition in the applications menu (an entry and icon, under
     /// $XDG_DATA_HOME), or take it out with --remove
     DesktopEntry {
         /// Remove the entry and the icon, and stop adding them back
@@ -591,6 +601,22 @@ fn execute(command: Cmd, as_json: bool) -> Result<(), String> {
                 );
             }
         }
+        Cmd::InstallLocal { package, tag } => {
+            let tag = backend::install_local(&package, &tag)?;
+            if as_json {
+                json(serde_json::json!({
+                    "installed": tag,
+                    "selected": tag,
+                    "prepared": backend::is_prepared(&tag),
+                }));
+            } else if backend::is_prepared(&tag) {
+                println!("Installed and selected {tag}. It can reuse resources already prepared by this launcher.");
+            } else {
+                println!(
+                    "Installed and selected {tag}. Prepare it from your Minecraft install with `horizon-launcher prepare --version {tag}`, then play it with `horizon-launcher play --version {tag}`."
+                );
+            }
+        }
         Cmd::Remove { tag } => {
             backend::remove_version(&tag)?;
             println!("Removed {tag}.");
@@ -674,7 +700,9 @@ fn execute(command: Cmd, as_json: bool) -> Result<(), String> {
                     ("Sponsor", &links.sponsor),
                     ("Website", &links.website),
                 ] {
-                    println!("{name:<8} {}", if url.is_empty() { "(none)" } else { url });
+                    if !url.is_empty() {
+                        println!("{name:<8} {url}");
+                    }
                 }
             }
         }
@@ -783,10 +811,10 @@ fn execute(command: Cmd, as_json: bool) -> Result<(), String> {
             settings.save();
             if remove {
                 horizon_launcher::desktop::remove()?;
-                println!("Removed Horizon from the applications menu.");
+                println!("Removed Minecraft: Rust Edition from the applications menu.");
             } else {
                 horizon_launcher::desktop::install(backend::exe_path())?;
-                println!("Horizon is in the applications menu.");
+                println!("Minecraft: Rust Edition is in the applications menu.");
             }
         }
         Cmd::Modpack { action } => modpack(action.unwrap_or(ModpackCmd::List), as_json)?,
@@ -808,12 +836,12 @@ fn update(check: bool, as_json: bool) -> Result<(), String> {
         return Ok(());
     }
     match &updates.horizon {
-        None => println!("Horizon: up to date."),
-        Some(r) if check => println!("Horizon: {} is available.", r.tag),
+        None => println!("Game: up to date."),
+        Some(r) if check => println!("Game: {} is available.", r.tag),
         Some(r) => {
             let tag =
                 backend::install_tag(&r.tag, true, progress(format!("Installing {}", r.tag)))?;
-            println!("Horizon: installed {tag}.");
+            println!("Game: installed {tag}.");
         }
     }
     match &updates.launcher {
@@ -1073,7 +1101,7 @@ fn servers(action: ServersCmd, as_json: bool) -> Result<(), String> {
             let tag = backend::resolve_version(version.as_deref())?;
             servers::set_up(&tag)?;
             println!(
-                "Servers run Horizon {}",
+                "Servers run Minecraft: Rust Edition {}",
                 servers::runtime_release().unwrap_or(tag)
             );
         }
@@ -1408,7 +1436,7 @@ fn modpack(action: ModpackCmd, as_json: bool) -> Result<(), String> {
                     );
                 } else {
                     println!(
-                        "{} {}  ({}, from Horizon's registry)\n  {}",
+                        "{} {}  ({}, from the dev registry)\n  {}",
                         p.name,
                         p.version,
                         p.id,
@@ -1463,6 +1491,25 @@ mod tests {
         match cli.command {
             Some(Cmd::Play { arg, .. }) => assert_eq!(arg, ["--server-thread", "40"]),
             _ => panic!("expected play"),
+        }
+    }
+
+    #[test]
+    fn local_install_has_a_distinct_source_package_command() {
+        let cli = Cli::try_parse_from([
+            "horizon-launcher",
+            "install-local",
+            "out/source-build",
+            "--tag",
+            "local-ci",
+        ])
+        .unwrap();
+        match cli.command {
+            Some(Cmd::InstallLocal { package, tag }) => {
+                assert_eq!(package, PathBuf::from("out/source-build"));
+                assert_eq!(tag, "local-ci");
+            }
+            _ => panic!("expected install-local"),
         }
     }
 

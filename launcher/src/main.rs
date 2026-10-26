@@ -2194,9 +2194,9 @@ impl Launcher {
             )),
         );
         let help = if crash.report.is_some() {
-            "When you report it on Discord, attach the crash report file (or paste it with Copy report) and say what you were doing."
+            "If you ask for help, attach the crash report file (or paste it with Copy report) and say what you were doing."
         } else {
-            "The game ended without a crash report. When you report it on Discord, attach latest.log from the logs folder and say what you were doing."
+            "The game ended without a crash report. If you ask for help, attach latest.log from the logs folder and say what you were doing."
         };
         let mut body = div()
             .flex_1()
@@ -2871,13 +2871,18 @@ impl Launcher {
                 None
             } else {
                 Some(
-                    button("import-session", "Use Prism account", Kind::Secondary, &t)
-                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                            this.sign_in = Some(SignIn::import_existing());
-                            this.sign_in_state = Some(SignInState::Starting);
-                            cx.notify();
-                        }))
-                        .into_any_element(),
+                    button(
+                        "import-session",
+                        "Import launcher session",
+                        Kind::Secondary,
+                        &t,
+                    )
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        this.sign_in = Some(SignIn::import_existing());
+                        this.sign_in_state = Some(SignInState::Starting);
+                        cx.notify();
+                    }))
+                    .into_any_element(),
                 )
             }
         } else if let Some(SignInState::Code(code)) = &self.sign_in_state {
