@@ -313,6 +313,47 @@ fn a_modrinth_loader_profile_has_the_client_jar() {
 }
 
 #[test]
+fn official_fabric_profiles_find_the_pinned_jar_without_a_vanilla_profile_jar() {
+    let s = Scratch::new("official-fabric");
+    let jar = "versions/fabric-loader-0.19.5-26.3/fabric-loader-0.19.5-26.3.jar";
+    let dir = s.launcher("minecraft", "", jar);
+    s.write(
+        "minecraft/versions/fabric-loader-0.19.5-26.3/fabric-loader-0.19.5-26.3.json",
+        br#"{"id":"fabric-loader-0.19.5-26.3","inheritsFrom":"26.3"}"#,
+    );
+    let linked = s.0.join("linked");
+    assert_eq!(
+        resolve_with(&dir, &[], &linked, &Mojang::new(MANIFEST)).unwrap(),
+        linked
+    );
+    assert_linked(&linked, &dir, jar);
+    // Inheritance is a discovery hint, never permission to use a modified game jar.
+    fs::write(dir.join(jar), b"patched client, not vanilla").unwrap();
+    assert!(find(&dir, &pins()).is_err());
+}
+
+#[test]
+fn loader_metadata_does_not_select_a_different_version_or_follow_a_path() {
+    let s = Scratch::new("loader-metadata");
+    let jar = "versions/custom/custom.jar";
+    let dir = s.launcher("minecraft", "", jar);
+    for metadata in [
+        br#"{"inheritsFrom":"26.2"}"#.as_slice(),
+        br#"{"inheritsFrom":"../26.3"}"#.as_slice(),
+        br#"{"jar":"../../outside"}"#.as_slice(),
+        b"not JSON".as_slice(),
+    ] {
+        s.write("minecraft/versions/custom/custom.json", metadata);
+        assert!(find(&dir, &pins()).is_err());
+    }
+    s.write(
+        "minecraft/versions/custom/custom.json",
+        br#"{"jar":"26.3"}"#,
+    );
+    assert_eq!(find(&dir, &pins()).unwrap().client, dir.join(jar));
+}
+
+#[test]
 fn an_instance_folder_may_be_chosen() {
     let s = Scratch::new("instance");
     let jar = "libraries/com/mojang/minecraft/26.3/minecraft-26.3-client.jar";

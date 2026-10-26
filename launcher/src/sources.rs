@@ -195,9 +195,9 @@ fn client_jars(base: &Path, version: &str) -> Vec<String> {
     jars
 }
 
-/// The client jars the Modrinth App keeps for a mod loader's profile: `versions/<v>-<loader>/`,
-/// the vanilla jar under the loader's name, when only a Fabric or Quilt profile of the version
-/// was ever played (#1783). The jar is checked against the pin like the others.
+/// Some launchers keep vanilla's jar under the loader profile's name. Modrinth prefixes the
+/// Minecraft version; official Fabric profiles put it last. Read their inheritance metadata
+/// as well, then check the candidate jar against the pinned vanilla hash in `find`.
 fn loader_jars(base: &Path, version: &str) -> Vec<String> {
     let prefix = format!("{version}-");
     let mut jars: Vec<String> = fs::read_dir(base.join("versions"))
@@ -205,7 +205,22 @@ fn loader_jars(base: &Path, version: &str) -> Vec<String> {
         .flatten()
         .flatten()
         .filter_map(|entry| entry.file_name().into_string().ok())
-        .filter(|name| name.starts_with(&prefix))
+        .filter(|name| {
+            if name.starts_with(&prefix) {
+                return true;
+            }
+            let metadata = base
+                .join("versions")
+                .join(name)
+                .join(format!("{name}.json"));
+            fs::read_to_string(metadata)
+                .ok()
+                .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+                .is_some_and(|profile| {
+                    profile["inheritsFrom"].as_str() == Some(version)
+                        || profile["jar"].as_str() == Some(version)
+                })
+        })
         .map(|name| format!("versions/{name}/{name}.jar"))
         .collect();
     jars.sort();
