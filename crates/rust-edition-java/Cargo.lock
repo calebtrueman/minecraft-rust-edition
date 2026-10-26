@@ -1777,7 +1777,9 @@ name = "rust-edition-java"
 version = "0.1.0"
 dependencies = [
  "ristretto_vm",
+ "serde_json",
  "tokio",
+ "zip",
 ]
 
 [[package]]

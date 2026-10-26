@@ -7,7 +7,7 @@ The `horizon-jvm` crate is a first runtime building block. A caller supplies cla
 
 The instruction set also includes integer arithmetic and branches. It checks instruction boundaries and local-variable use, rejects bytecode it does not understand, caps each run at ten million instructions, nested calls at 64 frames, and class hierarchies at 128 levels and 65,536 links. It rejects classes with initialization code and only allocates concrete classes whose instance fields are all `int`. The reader is not a full JVM class verifier. It is not connected to the game or mod loader. It does not load a Fabric mod, call a Fabric entrypoint, support arrays, implement a Minecraft Java API, apply Mixins, or claim compatibility with any mod.
 
-## Ristretto callback proof
+## Ristretto library checks and Fabric startup
 
 The separate `rust-edition-java` crate wraps patched Ristretto VM 0.34. The caller gives it a Ristretto library home, mod class paths and Rust native-method functions. It runs in interpreted mode. A tiny class built by `javac` calls a Rust `hostCall` function and gets `42`. The test also checks that an unregistered native method fails with `UnsatisfiedLinkError`, and a Rust callback does not replace ordinary Java bytecode. Java sources and class files stay in a temporary test folder.
 
@@ -30,13 +30,25 @@ one lock across the comparison and write. The test checks successful and rejecte
 null values, and one-time class initialization. If the runtime resolves a different class
 with the same name, it rejects the update; support for that separate-loader case remains open.
 
-This proves that Ristretto can run these supplied Java classes and call a registered Rust function. The game and loader do not use this crate yet. It does not load a Fabric JAR, call a Fabric entrypoint, provide Minecraft or Fabric classes, apply Mixins, or make any installed mod compatible.
+An isolated startup test also runs the real Fabric Loader 0.19.5 and Mixin with Minecraft 26.3
+libraries through the Rust adapter. Fabric finds a tiny original test mod and calls its
+`ModInitializer.onInitialize` method, which calls a registered Rust function exactly once.
+This needs eight JDK modules and the JDK's security
+configuration; the default base-only test home is too small.
+
+The game does not use this adapter yet. Starting this test mod does not prove that installed
+mods work, that their Mixins change the native game, or that their Minecraft calls reach the
+Rust game. Minecraft gameplay remains outside this test.
 
 ## Next step toward a game bridge
 
 Build a separate, opt-in `horizon-fabric-bridge` for Java mods. Keep it out of the existing `horizon-mods` WebAssembly runtime, whose sandbox is part of its promise. The adapter can run Java code, but it does not yet limit file or network access like WebAssembly does. Do not start untrusted Java JARs in the game process until that safety boundary is in place.
 
-The first useful bridge is one small vertical slice: read `fabric.mod.json` from an installed JAR, add its declared entrypoint and required JARs to `JavaVm::new`, provide the Fabric classes that entrypoint needs, and call `ModInitializer.onInitialize`. Add one supported tick event whose Rust native function registers a Java callback. At `Game::tick_mods` in `crates/horizon-client/src/game/mods.rs`, deliver a copied game snapshot and collect bounded actions, following the snapshot pattern already used by `crates/horizon-mods`. Never hand Java code a mutable pointer to `Game`.
+The next game test should connect one supported tick event to the loaded mod. A Rust native
+function can register its Java callback. At `Game::tick_mods` in
+`crates/horizon-client/src/game/mods.rs`, deliver a copied game snapshot and collect bounded
+actions, following the snapshot pattern already used by `crates/horizon-mods`. Never hand
+Java code a mutable pointer to `Game`.
 
 First prove that route with a small Java JAR built in a test: its initializer registers the tick event, and the game test hook confirms the callback ran. Then try one installed mod whose listed classes and calls fit that same supported slice. Use `crates/horizon-port-pack/src/classes.rs` to flag Mixins and other unsupported code early; its scan is an inventory, not a loader. Add more events and Java/Fabric classes only when a fixture tests them. This path gets one selected mod through the native bridge; it does not make arbitrary Fabric mods compatible.
 
@@ -54,7 +66,11 @@ A practical implementation would need these layers, with compatibility measured 
 6. Transform classes in the right order for Mixins, access wideners, mapping names and other declared transformations.
 7. Add isolation, resource limits and failure handling. A Java mod is executable code, so parsing safely is not enough to make running it safe.
 
-The `horizon-jvm` prototype proves that Rust can load a bounded set of class files, follow parent constructors and inherited fields, dispatch an override, and make an interface call in a tiny Java-made example. The separate Ristretto callback proof is described above; neither runtime is connected to the game. The next major pieces include class verification, arrays, exceptions and class initialization. Fabric still needs the loader, transformations and host APIs listed above before any installed mod can run.
+The `horizon-jvm` prototype proves a small set of class and method operations. Its missing
+pieces still include arrays, exceptions and class initialization. The separate Ristretto
+adapter reaches the Fabric startup test described above. Neither runtime is connected to
+the game. Installed mods still need their Minecraft calls and class changes to work with
+the native game, and their behavior needs separate testing.
 
 ## Try the first slice
 
@@ -79,7 +95,9 @@ cargo test --release --manifest-path crates/rust-edition-java/Cargo.toml
 ```
 
 The helper writes `release`, `java.base.jmod`, and `lib/tzdb.dat` under ignored `.local/` scratch space.
-The tests compile original Java fixtures into temporary folders and compare their results with Java 25. They are not Fabric or game tests.
+The default tests compile original Java fixtures into temporary folders and compare their
+results with Java 25. The separate Fabric startup test requires explicit opt-in and local
+libraries. See [the adapter's instructions](../crates/rust-edition-java/README.md).
 
 ## Read installed mod metadata
 

@@ -27,6 +27,7 @@ This is work in progress, not a finished replacement for Java Edition.
 - **Fabric and Java mod jars do not run in the Rust engine.** Reading a modpack's data and assets
   is not the same as running its mods. Separate tests cover a small Rust bytecode interpreter
   and a bridge built on the Rust-based Ristretto VM. Neither is connected to the game yet.
+  An isolated test starts Fabric and Mixin through that bridge and runs one tiny test mod.
   See [the compatibility work](docs/java-mod-compatibility.md).
 - Updates point to this fork. No fork release binaries have been published yet. Release signing
   still needs this fork's own key before distributing builds.
