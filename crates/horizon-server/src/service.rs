@@ -75,8 +75,8 @@ pub fn systemd_unit(program: &Path, dir: &Path, user: Option<&str>) -> String {
     };
     format!(
         "[Unit]
-Description=Horizon server in {dir}
-Documentation=https://github.com/ludovic111/horizon/blob/main/docs/server.md
+Description=Minecraft: Rust Edition server in {dir}
+Documentation=https://github.com/calebtrueman/minecraft-rust-edition/blob/main/docs/server.md
 Wants=network-online.target
 After=network-online.target
 
@@ -387,6 +387,10 @@ mod tests {
         );
         assert!(unit.contains("User=mc\n"));
         assert!(unit.contains("WantedBy=multi-user.target"));
+        assert!(unit.contains("Description=Minecraft: Rust Edition server in /srv/mc"));
+        assert!(unit.contains(
+            "Documentation=https://github.com/calebtrueman/minecraft-rust-edition/blob/main/docs/server.md"
+        ));
         let plist = launchd_plist(
             "dev.horizon.server.mc",
             Path::new("/opt/h/horizon-server"),

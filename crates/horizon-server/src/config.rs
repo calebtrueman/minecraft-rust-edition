@@ -15,7 +15,7 @@ pub const FILE: &str = "server.toml";
 pub const PROPERTIES: &str = "server.properties";
 
 /// What `init` writes: every typed setting, with vanilla 26.3's defaults and what it means.
-pub const TEMPLATE: &str = r##"# Horizon server settings (docs/server.md). The server writes them into server.properties before
+pub const TEMPLATE: &str = r##"# Minecraft: Rust Edition server settings (docs/server.md). The server writes them into server.properties before
 # every start: edit this file, not that one.
 
 [server]

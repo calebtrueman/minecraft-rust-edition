@@ -1,10 +1,10 @@
 #!/bin/sh
-# Installs horizon-server (docs/server.md) on Linux or macOS: the latest Horizon release for this computer,
+# Installs horizon-server (docs/server.md) on Linux or macOS: the latest Minecraft: Rust Edition release,
 # downloaded from GitHub Releases and checked against the SHA-256 GitHub publishes for it. On Linux that is
 # the server build (horizon-server-linux-x86_64.tar.gz), which needs neither ALSA nor udev.
 #
-#   curl -fsSL https://raw.githubusercontent.com/ludovic111/horizon/main/packaging/server/install.sh | sh
-#   curl -fsSL .../install.sh | sh -s -- --version v0.5.0 --dir /opt/horizon --bin /usr/local/bin
+#   curl -fsSL https://raw.githubusercontent.com/calebtrueman/minecraft-rust-edition/main/packaging/server/install.sh | sh
+#   curl -fsSL .../install.sh | sh -s -- --version TAG --dir /opt/minecraft-rust-edition-server --bin /usr/local/bin
 #   sh install.sh --archive horizon-server-linux-x86_64.tar.gz --version mybuild   (an archive you have)
 #
 # It needs curl, tar or unzip, and sha256sum or shasum; it never asks for sudo (pick folders you can write).
@@ -13,13 +13,13 @@
 # Nothing of Mojang's is downloaded.
 set -eu
 
-REPO=ludovic111/horizon
+REPO=calebtrueman/minecraft-rust-edition
 VERSION=latest
-DIR="${XDG_DATA_HOME:-$HOME/.local/share}/horizon"
+DIR="${XDG_DATA_HOME:-$HOME/.local/share}/minecraft-rust-edition-server"
 BIN="$HOME/.local/bin"
 ARCHIVE=
 
-die() { echo "horizon install: $*" >&2; exit 1; }
+die() { echo "Minecraft: Rust Edition server installer: $*" >&2; exit 1; }
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -36,7 +36,7 @@ done
 case "$(uname -s)-$(uname -m)" in
   Linux-x86_64) ASSETS="horizon-server-linux-x86_64.tar.gz horizon-linux-x86_64.tar.gz" ;;
   Darwin-arm64) ASSETS=horizon-macos-arm64.zip ;;
-  *) die "no Horizon release for $(uname -s) $(uname -m) yet: build it from source (docs/server.md)" ;;
+  *) die "no Minecraft: Rust Edition release for $(uname -s) $(uname -m) yet: build it from source (docs/server.md)" ;;
 esac
 
 TMP=$(mktemp -d)
@@ -73,7 +73,7 @@ else
   [ -n "$URL" ] || die "release $TAG has none of $ASSETS"
   [ -n "$DIGEST" ] || die "release $TAG publishes no SHA-256 for $ASSET"
 
-  echo "Downloading Horizon $TAG ($ASSET)..."
+  echo "Downloading Minecraft: Rust Edition server $TAG ($ASSET)..."
   curl -fL --progress-bar -o "$TMP/$ASSET" "$URL"
   GOT=$($SHA "$TMP/$ASSET" | cut -d' ' -f1)
   [ "$GOT" = "$DIGEST" ] || die "$ASSET doesn't match its SHA-256 (got $GOT, expected $DIGEST): not installed"
@@ -101,7 +101,7 @@ for tool in horizon-server horizon-prepare; do
   chmod +x "$BIN/$tool"
 done
 
-echo "Installed Horizon $TAG in $RELEASE; horizon-server and horizon-prepare are in $BIN."
+echo "Installed Minecraft: Rust Edition server $TAG in $RELEASE; horizon-server and horizon-prepare are in $BIN."
 # The full game (releases before the server build) links ALSA and udev; minimal Linux images often lack them.
 if [ "$(uname -s)" = Linux ] && [ ! -e "$RELEASE/horizon-engine" ] && command -v ldd >/dev/null; then
   MISSING=$(ldd "$RELEASE/horizon-client" 2>/dev/null | awk '/not found/ { printf "%s ", $1 }')

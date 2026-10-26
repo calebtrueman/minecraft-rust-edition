@@ -13,7 +13,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-const REPO: &str = "ludovic111/horizon";
+const REPO: &str = "calebtrueman/minecraft-rust-edition";
 /// The release archives for this computer, most specific first: on Linux the server build (no ALSA or
 /// udev), else the full game (releases before the server build).
 const ASSETS: &[&str] = if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
@@ -252,16 +252,20 @@ fn fetch(url: &str) -> Result<Vec<u8>, String> {
 /// The newest stable release (or `tag`), from GitHub's API, with the SHA-256 its signed checksums
 /// give for this computer's archive.
 pub fn release(tag: Option<&str>) -> Result<Release, String> {
-    let url = match tag {
-        Some(tag) => format!("https://api.github.com/repos/{REPO}/releases/tags/{tag}"),
-        None => format!("https://api.github.com/repos/{REPO}/releases/latest"),
-    };
+    let url = release_url(tag);
     let text = fetch(&url).map_err(|e| match e.as_str() {
         "404" => format!("no release {} on GitHub", tag.unwrap_or("")),
         _ => e,
     })?;
     let json = serde_json::from_slice(&text).map_err(|e| format!("GitHub's answer: {e}"))?;
     pick(&json, fetch, &horizon_release_sign::trusted_keys())
+}
+
+fn release_url(tag: Option<&str>) -> String {
+    match tag {
+        Some(tag) => format!("https://api.github.com/repos/{REPO}/releases/tags/{tag}"),
+        None => format!("https://api.github.com/repos/{REPO}/releases/latest"),
+    }
 }
 
 /// The archive for this computer in a release's JSON, with the SHA-256 the release's SHA256SUMS
@@ -608,7 +612,7 @@ pub fn command(dir: &Path, args: &[String]) -> Result<(), String> {
             if check {
                 if newer(&release.tag, &current) {
                     println!(
-                        "Horizon {} is out; this server runs {current}. `horizon-server update` installs it.",
+                        "Version {} is available; this server runs {current}. `horizon-server update` installs it.",
                         release.tag
                     );
                 } else {
@@ -623,7 +627,7 @@ pub fn command(dir: &Path, args: &[String]) -> Result<(), String> {
                 println!("Already on the newest release ({current}).");
                 return Ok(());
             }
-            println!("Downloading Horizon {} ({})...", release.tag, release.asset);
+            println!("Downloading version {} ({})...", release.tag, release.asset);
             let archive = download(&install, &release)?;
             (release.tag, archive, true)
         }
@@ -805,6 +809,18 @@ mod tests {
         std::os::unix::fs::symlink(root.join("releases").join(tags[0]), root.join("current"))
             .unwrap();
         Install { root }
+    }
+
+    #[test]
+    fn release_urls_point_to_the_fork() {
+        assert_eq!(
+            release_url(None),
+            "https://api.github.com/repos/calebtrueman/minecraft-rust-edition/releases/latest"
+        );
+        assert_eq!(
+            release_url(Some("v0.1.0")),
+            "https://api.github.com/repos/calebtrueman/minecraft-rust-edition/releases/tags/v0.1.0"
+        );
     }
 
     #[test]

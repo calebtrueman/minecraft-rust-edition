@@ -144,7 +144,7 @@ pub fn resources(config: &Config, dir: &Path, program: Option<&Path>) -> Result<
                 .map(|d| format!("  {}", d.display()))
                 .collect();
             format!(
-                "no prepared game files. Horizon reads them from your own copy of Minecraft 26.3:\n\
+                "no prepared game files. The server reads them from your own copy of Minecraft 26.3:\n\
                  prepare them with `horizon-prepare --prepare --server-jar PATH` (or the launcher) and copy \
                  the folder to resources/ here, or set engine.resources in server.toml. Looked in:\n{}",
                 tried.join("\n")

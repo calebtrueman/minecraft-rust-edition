@@ -97,7 +97,7 @@ impl Auth {
 
 fn page_error(status: u16, message: &str) -> Response {
     let body = format!(
-        "<!doctype html><meta charset=utf-8><title>Horizon server</title>\
+        "<!doctype html><meta charset=utf-8><title>Minecraft: Rust Edition server</title>\
          <link rel=stylesheet href=/panel.css><main class=message><p>{}</p></main>",
         message
             .replace('&', "&amp;")

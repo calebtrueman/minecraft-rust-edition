@@ -408,7 +408,7 @@ fn check_updates(shared: Arc<Shared>) {
                             &shared,
                             "INFO",
                             &format!(
-                                "Horizon {tag} is out (this server runs {current}): `horizon-server update` \
+                                "Version {tag} is available (this server runs {current}): `horizon-server update` \
                                  installs it, and goes back by itself if it doesn't start"
                             ),
                         );

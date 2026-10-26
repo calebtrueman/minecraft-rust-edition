@@ -1,23 +1,23 @@
-# Installs horizon-server (docs/server.md) on Windows: the latest Horizon release, downloaded from GitHub
+# Installs horizon-server (docs/server.md) on Windows: the latest Minecraft: Rust Edition release, downloaded from GitHub
 # Releases and checked against the SHA-256 GitHub publishes for it.
 #
-#   irm https://raw.githubusercontent.com/ludovic111/horizon/main/packaging/server/install.ps1 | iex
-#   & ([scriptblock]::Create((irm .../install.ps1))) -Version v0.5.0 -Dir D:\Horizon
+#   irm https://raw.githubusercontent.com/calebtrueman/minecraft-rust-edition/main/packaging/server/install.ps1 | iex
+#   & ([scriptblock]::Create((irm .../install.ps1))) -Version TAG -Dir D:\minecraft-rust-edition-server
 #
 # Releases go to <Dir>\releases\<version>, <Dir>\current points at the one in use, and <Dir>\bin (added to
 # your PATH) holds horizon-server.cmd and horizon-prepare.cmd. The game files you prepare from your own
 # Minecraft stay in <Dir>\game-files across updates. Nothing of Mojang's is downloaded. No admin rights.
 param(
     [string]$Version = "latest",
-    [string]$Dir = (Join-Path $env:LOCALAPPDATA "Horizon")
+    [string]$Dir = (Join-Path $env:LOCALAPPDATA "minecraft-rust-edition-server")
 )
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 
-$Repo = "ludovic111/horizon"
+$Repo = "calebtrueman/minecraft-rust-edition"
 $Asset = "horizon-windows-x64.zip"
 if ($env:PROCESSOR_ARCHITECTURE -ne "AMD64") {
-    throw "No Horizon release for Windows on $env:PROCESSOR_ARCHITECTURE yet: build it from source (docs/server.md)"
+    throw "No Minecraft: Rust Edition release for Windows on $env:PROCESSOR_ARCHITECTURE yet: build it from source (docs/server.md)"
 }
 
 $Api = if ($Version -eq "latest") { "https://api.github.com/repos/$Repo/releases/latest" }
@@ -29,10 +29,10 @@ if (-not $Item) { throw "Release $Tag has no $Asset" }
 if (-not $Item.digest -or -not $Item.digest.StartsWith("sha256:")) { throw "Release $Tag publishes no SHA-256 for $Asset" }
 $Digest = $Item.digest.Substring(7)
 
-$Tmp = Join-Path ([IO.Path]::GetTempPath()) ("horizon-install-" + [Guid]::NewGuid())
+$Tmp = Join-Path ([IO.Path]::GetTempPath()) ("minecraft-rust-edition-server-install-" + [Guid]::NewGuid())
 New-Item -ItemType Directory -Path $Tmp | Out-Null
 try {
-    Write-Host "Downloading Horizon $Tag ($Asset)..."
+    Write-Host "Downloading Minecraft: Rust Edition server $Tag ($Asset)..."
     $Zip = Join-Path $Tmp $Asset
     Invoke-WebRequest -Uri $Item.browser_download_url -OutFile $Zip
     $Got = (Get-FileHash -Algorithm SHA256 $Zip).Hash.ToLowerInvariant()
@@ -67,7 +67,7 @@ try {
         [Environment]::SetEnvironmentVariable("Path", ($UserPath.TrimEnd(";") + ";" + $Bin).TrimStart(";"), "User")
         Write-Host "Added $Bin to your PATH: open a new terminal to use it."
     }
-    Write-Host "Installed Horizon $Tag in $Target."
+    Write-Host "Installed Minecraft: Rust Edition server $Tag in $Target."
     if (-not (Get-ChildItem -Path $GameFiles -ErrorAction SilentlyContinue)) {
         Write-Host "Next, prepare the game files from your own Minecraft 26.3 (it needs Java 25 and the game installed"
         Write-Host "once by the official launcher; see docs/server.md):"

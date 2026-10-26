@@ -44,24 +44,26 @@ plan are in [docs/server.md](https://github.com/ludovic111/horizon/blob/main/doc
 Linux (x86-64) and macOS (Apple Silicon):
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/ludovic111/horizon/main/packaging/server/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/calebtrueman/minecraft-rust-edition/main/packaging/server/install.sh | sh
 ```
 
 Windows (x64), in PowerShell:
 
 ```powershell
-irm https://raw.githubusercontent.com/ludovic111/horizon/main/packaging/server/install.ps1 | iex
+irm https://raw.githubusercontent.com/calebtrueman/minecraft-rust-edition/main/packaging/server/install.ps1 | iex
 ```
 
-The script downloads the latest Horizon release for your computer from GitHub, checks it against the SHA-256
-GitHub publishes, and never asks for sudo or administrator rights. It installs:
+The fork has no published release yet (checked 2026-10-26), so these commands cannot install it until one is
+available. Once a release is published, the script downloads it from GitHub, checks its SHA-256, and never
+asks for sudo or administrator rights. It installs:
 
-- the release in `~/.local/share/horizon/releases/<version>` (Windows: `%LOCALAPPDATA%\Horizon`), with
+- the release in `~/.local/share/minecraft-rust-edition-server/releases/<version>` (Windows:
+  `%LOCALAPPDATA%\minecraft-rust-edition-server`), with
   `current` pointing at the one in use;
 - `horizon-server` and `horizon-prepare` in `~/.local/bin` (Windows: added to your PATH);
 - a `game-files` folder for the files you prepare, kept across updates.
 
-Options: `--version vX.Y.Z`, `--dir FOLDER`, `--bin FOLDER` (Windows: `-Version`, `-Dir`). Other systems,
+Options: `--version TAG`, `--dir FOLDER`, `--bin FOLDER` (Windows: `-Version`, `-Dir`). Other systems,
 such as Linux on ARM, build from source: `cargo build --release -p horizon-client --bin horizon-client -p
 horizon-server` and keep both programs in one folder.
 
@@ -83,7 +85,7 @@ Add `--minecraft-dir PATH` if your launcher keeps the game elsewhere. The prepar
 
 **On a headless machine** (a VPS, a home server), prepare on your own computer instead, with the launcher or
 `horizon-prepare`, and copy the prepared `26.3` folder to the server: into
-`~/.local/share/horizon/game-files/horizon-client/26.3`, or into `resources/` in the server folder, or anywhere
+`~/.local/share/minecraft-rust-edition-server/game-files/horizon-client/26.3`, or into `resources/` in the server folder, or anywhere
 `[engine] resources` in `server.toml` names. A folder copied this way needs release v2026.10.17.07 or
 newer: older ones don't keep `registries.json` and `commands.json` with the prepared files, and the
 server then stops with "registries.json not found next to the resources". Prepare again with a newer release.

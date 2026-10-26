@@ -256,7 +256,7 @@ fn describe(status: &Value) -> String {
         out += &format!("Updating: {busy}\n");
     } else if let Some(tag) = update["available"].as_str() {
         out += &format!(
-            "Horizon {tag} is out (this server runs {}): `horizon-server update` installs it\n",
+            "Version {tag} is available (this server runs {}): `horizon-server update` installs it\n",
             update["installed"].as_str().unwrap_or("?")
         );
     }
@@ -458,7 +458,7 @@ mod tests {
                 "phase": "running",
                 "update": { "installed": "v2026.10.18", "available": "v2026.10.19" }
             })),
-            "Running\nHorizon v2026.10.19 is out (this server runs v2026.10.18): `horizon-server update` installs it\n"
+            "Running\nVersion v2026.10.19 is available (this server runs v2026.10.18): `horizon-server update` installs it\n"
         );
         assert_eq!(
             describe(
