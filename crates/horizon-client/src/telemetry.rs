@@ -17,7 +17,11 @@ const MIN_SECONDS: f32 = 60.0;
 
 /// The details of a crash report that say what the game was doing, and only those: not the
 /// world, the server or the resource packs.
-const CRASH_DETAILS: [&str; 3] = ["Rust Edition Version", "Graphics Adapter", "Render Settings"];
+const CRASH_DETAILS: [&str; 3] = [
+    "Rust Edition Version",
+    "Graphics Adapter",
+    "Render Settings",
+];
 
 static STARTED: OnceLock<Instant> = OnceLock::new();
 /// When the menu bundle became ready, so the time to the title screen measures

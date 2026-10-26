@@ -53,7 +53,7 @@ pub fn refuse(spec: &str) -> Option<String> {
     }
     if horizon_port_pack::net::socks(spec) {
         return Some(format!(
-            "{} is a SOCKS proxy; Horizon downloads through an HTTP proxy, such as the \
+            "{} is a SOCKS proxy; the launcher downloads through an HTTP proxy, such as the \
              http:// address your proxy app also listens on.",
             horizon_port_pack::net::redacted(spec)
         ));

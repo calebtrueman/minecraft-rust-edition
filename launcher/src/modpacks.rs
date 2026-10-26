@@ -210,8 +210,8 @@ pub fn import_and_port(
 pub fn outcome(pack: &Imported) -> String {
     let not = pack.count(Status::NotYet);
     format!(
-        "{} is imported{}: {} of its {} files play in Horizon ({} ported, {} partly), {} don't \
-         yet, {} aren't needed{}. Its list says why.",
+        "{} is imported{}: {} of its {} files have data or assets that can be ported \
+         ({} fully, {} partly), {} still need support, {} aren't needed{}. Its list says why.",
         pack.title(),
         if pack.mods.is_empty() {
             ""

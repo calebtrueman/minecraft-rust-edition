@@ -103,7 +103,7 @@ fn problems_say_what_to_do() {
     assert!(port.message.contains("already used"), "{}", port.message);
     assert!(matches!(port.fix, Some(Fix::UsePort(p)) if p > 25565));
     let files = Problem::explain_with(
-        "horizon-server: no prepared game files. Horizon reads them from",
+        "horizon-server: no prepared game files. The server reads them from",
         "",
         &dir,
     );

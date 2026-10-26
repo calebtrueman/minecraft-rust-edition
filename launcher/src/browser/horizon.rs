@@ -14,12 +14,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-/// Where the registry publishes its index (GitHub Pages of ludovic111/horizon-mods).
-pub const INDEX_URL: &str = "https://ludovic111.github.io/horizon-mods/index.json";
-/// The registry's pages on the website, `<SITE>/<id>`.
-const SITE: &str = "https://playhorizon.dev/mods";
-/// The report form of a project.
-const REPORT: &str = "https://github.com/ludovic111/horizon-mods/issues/new?template=report.yml";
 /// The loader name the browser gives registry versions, so `support` and `pick` know them.
 pub const LOADER: &str = "horizon";
 /// How long a fetched index is used before it is fetched again.
@@ -28,12 +22,6 @@ const FRESH: Duration = Duration::from_secs(600);
 const MAX_INDEX: u64 = 16 << 20;
 /// The last index fetched, kept in the game folder for when the registry can't be reached.
 const CACHE: &str = "mod-browser/horizon-index.json";
-/// Players' ratings of every project (the registry service, crates/horizon-mod-registry).
-const RATINGS_URL: &str = "https://playhorizon.dev/api/mods/ratings";
-/// Where a player rates a project: the site's GitHub sign-in, which comes back to its page.
-/// The launcher has no GitHub account of its own.
-const RATE: &str = "https://playhorizon.dev/api/mods/auth/login?back=/mods/";
-
 /// The fork does not use the upstream registry unless a developer supplies an index.
 fn location() -> String {
     std::env::var("HORIZON_MOD_INDEX")
@@ -150,14 +138,8 @@ pub fn rating(id: &str) -> Option<Option<Rating>> {
     Some(known.get(id).copied())
 }
 
-/// The page that signs the player in with GitHub on the site and lets them rate `id`.
-pub fn rate_url(id: &str) -> String {
-    format!("{RATE}{id}")
-}
-
-/// Fetches the ratings again when the last try is ten minutes old: from `HORIZON_MOD_RATINGS`
-/// (a file or an `https://` address, for a test registry), else [`RATINGS_URL`]; a local test
-/// registry has none unless given. After a failure the browser shows downloads only.
+/// Fetch ratings only from an explicitly configured file or HTTPS address.
+/// After a failure the browser shows downloads only.
 fn refresh_ratings() {
     if RATINGS
         .lock()
@@ -170,10 +152,9 @@ fn refresh_ratings() {
     let given = std::env::var("HORIZON_MOD_RATINGS")
         .ok()
         .filter(|v| !v.is_empty());
-    if given.is_none() && local() {
+    let Some(at) = given else {
         return;
-    }
-    let at = given.unwrap_or_else(|| RATINGS_URL.to_owned());
+    };
     let text = if at.starts_with("https://") {
         download::agent(&at).get(&at).call().ok().and_then(|r| {
             use std::io::Read;
@@ -266,7 +247,7 @@ fn project_of(p: &index::Project) -> Option<Project> {
         summary: p.summary.clone(),
         author: p.authors.join(", "),
         downloads: p.downloads,
-        page: format!("{SITE}/{}", p.id),
+        page: p.source.clone(),
         icon: p.icon.clone(),
         license: p.license.clone(),
         kind: kind_of(&p.kind)?,
@@ -421,20 +402,10 @@ impl Source for Registry {
         });
         Ok(Details {
             body,
-            links: [
-                Link {
-                    label: "Source".into(),
-                    url: p.source.clone(),
-                },
-                Link {
-                    label: "Page".into(),
-                    url: project.page.clone(),
-                },
-                Link {
-                    label: "Report".into(),
-                    url: format!("{REPORT}&title={}", p.id),
-                },
-            ]
+            links: [Link {
+                label: "Source".into(),
+                url: p.source.clone(),
+            }]
             .into_iter()
             .chain(owners)
             .collect(),

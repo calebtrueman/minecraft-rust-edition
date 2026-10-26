@@ -76,14 +76,14 @@ impl SourceId {
     }
 }
 
-/// How well a project runs in Horizon.
+/// How much of a project this edition supports.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Support {
-    /// Made for the version Horizon plays, and Horizon reads everything it uses.
+    /// Made for this Minecraft version, with everything it needs supported.
     Works,
-    /// It loads, with the limit said.
+    /// Some of its content is supported, with the limit explained.
     Partial(String),
-    /// It can't run in Horizon: never offered for install.
+    /// It isn't supported, so it isn't offered for install.
     No(String),
 }
 
@@ -94,9 +94,9 @@ impl Support {
 
     pub fn label(&self) -> &'static str {
         match self {
-            Support::Works => "Works",
-            Support::Partial(_) => "Partly",
-            Support::No(_) => "Doesn't run",
+            Support::Works => "Supported",
+            Support::Partial(_) => "Partly supported",
+            Support::No(_) => "Not supported",
         }
     }
 
@@ -268,14 +268,14 @@ fn source_with_registry(id: SourceId, enable_registry: bool) -> Option<Box<dyn S
         .find(|s| s.id() == id)
 }
 
-/// How well a project of `kind` made for `game_versions` and `loaders` runs in Horizon.
+/// How much of a project of `kind` made for `game_versions` and `loaders` this edition supports.
 pub fn support(kind: Kind, game_versions: &[String], loaders: &[String]) -> Support {
     if loaders.iter().any(|l| l == horizon::LOADER) {
-        // Made for Horizon and reviewed: it runs when it is for the version Horizon plays.
+        // Made for this edition and reviewed: it works when it targets this game version.
         return match newest_release(game_versions)
             .filter(|_| !game_versions.iter().any(|v| v == GAME))
         {
-            Some(other) => Support::No(format!("Made for Horizon on {other}.")),
+            Some(other) => Support::No(format!("Made for Minecraft {other}.")),
             None => Support::Works,
         };
     }
@@ -292,21 +292,26 @@ pub fn support(kind: Kind, game_versions: &[String], loaders: &[String]) -> Supp
                 Support::Partial("Lists no Minecraft version.".into())
             }
         }
-        Kind::Modpack => {
-            Support::Partial("Horizon runs the mods it can port, from your own downloads.".into())
-        }
-        Kind::Shader => Support::No("Not one of Horizon's own shader packs.".into()),
+        Kind::Modpack => Support::Partial(
+            "The launcher ports supported mod data and assets from your own downloads. \
+                 Java mod code does not run."
+                .into(),
+        ),
+        Kind::Shader => Support::No("Not one of this edition's shader packs.".into()),
         Kind::Mod => {
             if !loaders.iter().any(|l| java::LOADERS.contains(&l.as_str())) {
                 Support::No("Not a Fabric, NeoForge or Forge mod.".into())
             } else if !game_versions.iter().any(|v| portable_version(v)) {
                 let newest = newest_release(game_versions).unwrap_or("an unknown version");
                 Support::No(format!(
-                    "Made for {newest}: Horizon ports mods made for 1.21 and later."
+                    "Made for {newest}: only mod data and assets from Minecraft 1.21 and later \
+                     can be ported."
                 ))
             } else {
                 Support::Partial(
-                    "Not checked yet: the launcher reads its jar to say what of it ports.".into(),
+                    "Not checked yet: the launcher reads its jar to say what data and assets \
+                     can be ported."
+                        .into(),
                 )
             }
         }
