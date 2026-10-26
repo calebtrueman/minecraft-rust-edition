@@ -1,0 +1,473 @@
+use crate::Error::{InvalidOperand, OperandStackOverflow, OperandStackUnderflow};
+use crate::Result;
+use ristretto_classloader::{Reference, Value};
+use ristretto_gc::Gc;
+use ristretto_gc::sync::RwLock;
+use std::fmt::Display;
+
+/// An unexpected value must be formatted and dropped only on the error path.
+#[cold]
+#[inline(never)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Move the rejected operand's drop into the cold path"
+)]
+fn invalid_type(expected: &str, value: Value) -> crate::Error {
+    InvalidOperand {
+        expected: expected.to_owned(),
+        actual: value.to_string(),
+    }
+}
+
+/// Operand stack for the Ristretto VM
+///
+/// # References
+/// - [JVMS §2.6.2](https://docs.oracle.com/javase/specs/jvms/se25/html/jvms-2.html#jvms-2.6.2)
+#[derive(Debug)]
+pub struct OperandStack {
+    stack: Vec<Value>,
+    max_size: usize,
+}
+
+impl OperandStack {
+    /// Create a new operand stack with a maximum size.
+    pub fn with_max_size(max_size: usize) -> Self {
+        OperandStack {
+            stack: Vec::with_capacity(max_size),
+            max_size,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn reset(&mut self, max_size: usize) {
+        self.stack.clear();
+        // Reusing a large allocation in small recursive frames must not multiply retained
+        // capacity independently of their declared Java stack requirements.
+        if self.stack.capacity() > max_size.saturating_mul(4).max(16) {
+            self.stack.shrink_to(max_size);
+        }
+        self.stack.reserve(max_size);
+        self.max_size = max_size;
+    }
+
+    pub(crate) fn capacity(&self) -> usize {
+        self.stack.capacity()
+    }
+
+    /// Borrow call arguments without allocating a temporary argument vector.
+    pub(crate) fn last_values(&self, count: usize) -> Result<&[Value]> {
+        let start = self
+            .stack
+            .len()
+            .checked_sub(count)
+            .ok_or(OperandStackUnderflow)?;
+        self.stack.get(start..).ok_or(OperandStackUnderflow)
+    }
+
+    /// Move call arguments directly into the callee's local slots.
+    pub(crate) fn drain_values(&mut self, count: usize) -> Result<std::vec::Drain<'_, Value>> {
+        let start = self
+            .stack
+            .len()
+            .checked_sub(count)
+            .ok_or(OperandStackUnderflow)?;
+        Ok(self.stack.drain(start..))
+    }
+
+    /// Drain the last `n` values from the operand stack.
+    ///
+    /// If `n` is greater than the stack length, drains all values.
+    pub fn drain_last(&mut self, n: usize) -> Vec<Value> {
+        let split_idx = self.stack.len().saturating_sub(n);
+        self.stack.split_off(split_idx)
+    }
+
+    /// Borrow an operand by its depth from the top without changing the stack.
+    pub(crate) fn peek_at(&self, depth: usize) -> Result<&Value> {
+        self.stack
+            .len()
+            .checked_sub(depth + 1)
+            .and_then(|index| self.stack.get(index))
+            .ok_or(OperandStackUnderflow)
+    }
+
+    /// Clear the operand stack.
+    pub fn clear(&mut self) {
+        self.stack.clear();
+    }
+
+    /// Push a value onto the operand stack.
+    #[inline]
+    pub fn push(&mut self, value: Value) -> Result<()> {
+        if self.stack.len() >= self.max_size {
+            return Err(OperandStackOverflow);
+        }
+        self.stack.push(value);
+        Ok(())
+    }
+
+    /// Push an int value onto the operand stack.
+    #[inline]
+    pub fn push_int(&mut self, value: i32) -> Result<()> {
+        self.push(Value::Int(value))
+    }
+
+    /// Push a long value onto the operand stack.
+    #[inline]
+    pub fn push_long(&mut self, value: i64) -> Result<()> {
+        self.push(Value::Long(value))
+    }
+
+    /// Push a float value onto the operand stack.
+    #[inline]
+    pub fn push_float(&mut self, value: f32) -> Result<()> {
+        self.push(Value::Float(value))
+    }
+
+    /// Push a double value onto the operand stack.
+    #[inline]
+    pub fn push_double(&mut self, value: f64) -> Result<()> {
+        self.push(Value::Double(value))
+    }
+
+    /// Push a reference onto the operand stack.
+    #[inline]
+    pub fn push_object(&mut self, value: Option<Gc<RwLock<Reference>>>) -> Result<()> {
+        self.push(Value::Object(value))
+    }
+
+    /// Pop a value from the operand stack.
+    #[inline]
+    pub fn pop(&mut self) -> Result<Value> {
+        let Some(value) = self.stack.pop() else {
+            return Err(OperandStackUnderflow);
+        };
+        Ok(value)
+    }
+
+    /// Pop an int from the operand stack.
+    #[inline]
+    pub fn pop_int(&mut self) -> Result<i32> {
+        match self.pop()? {
+            Value::Int(value) => Ok(value),
+            value => Err(invalid_type("int", value)),
+        }
+    }
+
+    /// Pop a long from the operand stack.
+    #[inline]
+    pub fn pop_long(&mut self) -> Result<i64> {
+        let value = match self.pop()? {
+            Value::Long(value) => value,
+            value => return Err(invalid_type("long", value)),
+        };
+        Ok(value)
+    }
+
+    /// Pop a float from the operand stack.
+    #[inline]
+    pub fn pop_float(&mut self) -> Result<f32> {
+        match self.pop()? {
+            Value::Float(value) => Ok(value),
+            value => Err(invalid_type("float", value)),
+        }
+    }
+
+    /// Pop a double from the operand stack.
+    #[inline]
+    pub fn pop_double(&mut self) -> Result<f64> {
+        let value = match self.pop()? {
+            Value::Double(value) => value,
+            value => return Err(invalid_type("double", value)),
+        };
+        Ok(value)
+    }
+
+    /// Pop a null or object from the operand stack.
+    #[inline]
+    pub fn pop_object(&mut self) -> Result<Option<Gc<RwLock<Reference>>>> {
+        let value = self.pop()?;
+        match value {
+            Value::Object(reference) => Ok(reference),
+            value => Err(invalid_type("object", value)),
+        }
+    }
+
+    /// Peek at the top value on the operand stack.
+    #[inline]
+    pub fn peek(&mut self) -> Result<Value> {
+        let Some(value) = self.stack.iter().last() else {
+            return Err(OperandStackUnderflow);
+        };
+        Ok(value.clone())
+    }
+
+    /// Get the number of values on the operand stack.
+    pub fn len(&self) -> usize {
+        self.stack.len()
+    }
+
+    /// Check if the operand stack is empty.
+    pub fn is_empty(&self) -> bool {
+        self.stack.is_empty()
+    }
+}
+
+impl Display for OperandStack {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut values = Vec::new();
+        let stack = &self.stack;
+        for stack_entry in stack {
+            let value = stack_entry.to_string();
+            let chars: Vec<char> = value.chars().collect();
+            if chars.len() > 100 {
+                let value = chars.iter().take(97).collect::<String>();
+                values.push(format!("{value}..."));
+            } else {
+                values.push(value);
+            }
+        }
+        write!(f, "[{}]", values.join(", "))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::operand_stack::OperandStack;
+    use ristretto_classloader::Reference;
+    use ristretto_gc::GarbageCollector;
+
+    #[test]
+    fn reused_capacity_preserves_declared_limit_and_arguments() -> Result<()> {
+        let mut stack = OperandStack::with_max_size(16);
+        stack.push_long(42)?;
+        let allocation = stack.stack.as_ptr();
+        stack.reset(2);
+        assert!(stack.is_empty());
+        stack.push_int(7)?;
+        stack.push_double(2.0)?;
+        assert!(matches!(stack.push_int(8), Err(OperandStackOverflow)));
+        assert!(matches!(stack.last_values(3), Err(OperandStackUnderflow)));
+        assert!(matches!(stack.drain_values(3), Err(OperandStackUnderflow)));
+        assert_eq!(2, stack.len());
+        assert_eq!(stack.last_values(1)?, &[Value::Double(2.0)]);
+        assert_eq!(stack.drain_values(1)?.next(), Some(Value::Double(2.0)));
+        assert_eq!(stack.pop_int()?, 7);
+        assert_eq!(allocation, stack.stack.as_ptr());
+        stack.reset(0);
+        assert!(matches!(stack.push_int(1), Err(OperandStackOverflow)));
+        Ok(())
+    }
+
+    #[test]
+    fn reuse_does_not_carry_large_buffers_into_small_frames() -> Result<()> {
+        let mut stack = OperandStack::with_max_size(16_384);
+        stack.reset(1);
+        assert!(stack.capacity() <= 16);
+        stack.push_int(42)?;
+        let mut locals = crate::LocalVariables::with_max_size(16_384);
+        locals.reset([Value::Int(7)], 1);
+        assert!(locals.capacity() <= 16);
+        assert_eq!(7, locals.get_int(0)?);
+        assert!(locals.get(1).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn test_drain_last() -> Result<()> {
+        let mut stack = OperandStack::with_max_size(4);
+        stack.push_int(1)?;
+        stack.push_int(2)?;
+        stack.push_int(3)?;
+        stack.push_int(4)?;
+        let values = stack.drain_last(2);
+        assert_eq!(values.as_slice(), &[Value::Int(3), Value::Int(4)]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_can_push_and_pop_values() -> Result<()> {
+        let mut stack = OperandStack::with_max_size(2);
+        stack.push_int(1)?;
+        stack.push_int(2)?;
+
+        assert_eq!(stack.len(), 2);
+
+        assert_eq!(stack.pop()?, Value::Int(2));
+        assert_eq!(stack.pop()?, Value::Int(1));
+        Ok(())
+    }
+
+    #[test]
+    fn test_pop_int() -> Result<()> {
+        let mut stack = OperandStack::with_max_size(1);
+        stack.push_int(42)?;
+        assert_eq!(stack.pop_int()?, 42);
+        Ok(())
+    }
+
+    #[test]
+    fn test_pop_int_invalid_operand() -> Result<()> {
+        let mut stack = OperandStack::with_max_size(1);
+        stack.push_object(None)?;
+        assert!(matches!(
+            stack.pop_int(),
+            Err(InvalidOperand {
+                expected,
+                actual
+            }) if expected == "int" && actual == "Object(null)"
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn test_pop_long() -> Result<()> {
+        let mut stack = OperandStack::with_max_size(2);
+        stack.push_long(42)?;
+        assert_eq!(stack.pop_long()?, 42);
+        Ok(())
+    }
+
+    #[test]
+    fn test_pop_long_invalid_operand() -> Result<()> {
+        let mut stack = OperandStack::with_max_size(2);
+        stack.push_double(42.1)?;
+        assert!(matches!(
+            stack.pop_long(),
+            Err(InvalidOperand {
+                expected,
+                actual
+            }) if expected == "long" && actual == "double(42.1)"
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn test_pop_float() -> Result<()> {
+        let mut stack = OperandStack::with_max_size(1);
+        stack.push_float(42.1)?;
+        let value = stack.pop_float()? - 42.1f32;
+        assert!(value.abs() < 0.1f32);
+        Ok(())
+    }
+
+    #[test]
+    fn test_pop_float_invalid_operand() -> Result<()> {
+        let mut stack = OperandStack::with_max_size(1);
+        stack.push_object(None)?;
+        assert!(matches!(
+            stack.pop_float(),
+            Err(InvalidOperand {
+                expected,
+                actual
+            }) if expected == "float" && actual == "Object(null)"
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn test_pop_double() -> Result<()> {
+        let mut stack = OperandStack::with_max_size(2);
+        stack.push_double(42.1)?;
+        let value = stack.pop_double()? - 42.1f64;
+        assert!(value.abs() < 0.1f64);
+        Ok(())
+    }
+
+    #[test]
+    fn test_pop_double_invalid_operand() -> Result<()> {
+        let mut stack = OperandStack::with_max_size(2);
+        stack.push_long(42)?;
+        assert!(matches!(
+            stack.pop_double(),
+            Err(InvalidOperand {
+                expected,
+                actual
+            }) if expected == "double" && actual == "long(42)"
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn test_pop_object() -> Result<()> {
+        let collector = GarbageCollector::new();
+        let mut stack = OperandStack::with_max_size(2);
+        let object = Reference::from(vec![42i8]);
+        stack.push_object(None)?;
+        let wrapped_object = Gc::new(&collector, RwLock::new(object.clone())).clone_gc();
+        stack.push_object(Some(wrapped_object))?;
+        let popped = stack.pop_object()?;
+        assert!(popped.is_some());
+        assert_eq!(*popped.expect("popped object").read(), object);
+        assert!(stack.pop_object()?.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn test_pop_object_invalid_operand() -> Result<()> {
+        let mut stack = OperandStack::with_max_size(1);
+        stack.push_int(42)?;
+        assert!(matches!(
+            stack.pop_object(),
+            Err(InvalidOperand {
+                expected,
+                actual
+            }) if expected == "object" && actual == "int(42)"
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn test_pop_underflow() {
+        let mut stack = OperandStack::with_max_size(1);
+        let result = stack.pop();
+        assert!(matches!(result, Err(OperandStackUnderflow)));
+    }
+
+    #[test]
+    fn test_push_overflow() -> Result<()> {
+        let mut stack = OperandStack::with_max_size(1);
+        stack.push_int(42)?;
+        let result = stack.push_int(43);
+        assert!(matches!(result, Err(OperandStackOverflow)));
+        Ok(())
+    }
+
+    #[test]
+    fn test_peek_top_value() -> Result<()> {
+        let mut stack = OperandStack::with_max_size(2);
+        stack.push_int(1)?;
+        stack.push_int(2)?;
+
+        assert_eq!(stack.peek()?, Value::Int(2));
+        assert_eq!(stack.len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn test_peek_underflow() {
+        let mut stack = OperandStack::with_max_size(1);
+        let result = stack.peek();
+        assert!(matches!(result, Err(OperandStackUnderflow)));
+    }
+
+    #[test]
+    fn test_is_empty() -> Result<()> {
+        let mut stack = OperandStack::with_max_size(1);
+        assert!(stack.is_empty());
+
+        stack.push_int(42)?;
+        assert!(!stack.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn test_display() -> Result<()> {
+        let mut stack = OperandStack::with_max_size(4);
+        stack.push_int(1)?;
+        stack.push_int(2)?;
+        assert_eq!("[int(1), int(2)]", stack.to_string());
+        Ok(())
+    }
+}

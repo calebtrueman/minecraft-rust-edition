@@ -3,6 +3,7 @@
 An unofficial Rust game and launcher, forked from [Horizon](https://github.com/ludovic111/horizon).
 Not an official Minecraft product. Not approved by or associated with Mojang or Microsoft.
 The original MIT license and credits remain in [LICENSE](LICENSE).
+Reused libraries and local changes are listed in [THIRD_PARTY.md](THIRD_PARTY.md).
 
 ## Fork status
 
@@ -24,8 +25,8 @@ This is work in progress, not a finished replacement for Java Edition.
   private command to the same player. This does not establish
   full Java multiplayer behavior or modded-server compatibility.
 - **Fabric and Java mod jars do not run in the Rust engine.** Reading a modpack's data and assets
-  is not the same as running its mods. An early Rust bytecode reader and interpreter is being
-  built and tested separately; it cannot load Fabric or run the installed mods yet.
+  is not the same as running its mods. Separate tests cover a small Rust bytecode interpreter
+  and a bridge built on the Rust-based Ristretto VM. Neither is connected to the game yet.
   See [the compatibility work](docs/java-mod-compatibility.md).
 - Updates point to this fork. No fork release binaries have been published yet. Release signing
   still needs this fork's own key before distributing builds.
@@ -50,6 +51,7 @@ Fabric mods. The separate account-checked multiplayer test is described above.
 
 ## Remaining work
 
-A complete Java/Fabric compatibility layer, broader server checks (including secure chat and
-modded servers), finished branding, independent release signing, and packaged releases remain.
+A complete Java/Fabric compatibility layer, broader server checks (including long secure-chat
+sessions and modded servers), finished branding, independent release signing, and packaged
+releases remain.
 The launcher changes alone do not solve these gaps.

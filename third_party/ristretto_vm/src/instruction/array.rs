@@ -1,0 +1,583 @@
+use crate::Error::{InternalError, InvalidStackValue};
+use crate::JavaError::{NegativeArraySizeException, NullPointerException};
+use crate::Result;
+use crate::frame::ExecutionResult::Continue;
+use crate::frame::{ExecutionResult, Frame};
+use crate::operand_stack::OperandStack;
+use crate::thread::Thread;
+use ristretto_classfile::BaseType;
+use ristretto_classfile::attributes::ArrayType;
+use ristretto_classloader::{Reference, Value};
+
+/// See: <https://docs.oracle.com/javase/specs/jvms/se25/html/jvms-6.html#jvms-6.5.newarray>
+#[inline]
+pub(crate) fn newarray(
+    frame: &Frame,
+    stack: &mut OperandStack,
+    array_type: &ArrayType,
+) -> Result<ExecutionResult> {
+    let thread = frame.thread()?;
+    let vm = thread.vm()?;
+    let count = stack.pop_int()?;
+    if count < 0 {
+        return Err(NegativeArraySizeException(count.to_string()).into());
+    }
+    let count = usize::try_from(count)?;
+    let collector = vm.garbage_collector();
+    let array = match array_type {
+        ArrayType::Boolean => Value::new_object(collector, Reference::from(vec![false; count])),
+        ArrayType::Byte => Value::new_object(collector, Reference::from(vec![0i8; count])),
+        ArrayType::Char => Value::new_object(collector, Reference::from(vec![0 as char; count])),
+        ArrayType::Float => Value::new_object(collector, Reference::from(vec![0.0f32; count])),
+        ArrayType::Double => Value::new_object(collector, Reference::from(vec![0.0f64; count])),
+        ArrayType::Short => Value::new_object(collector, Reference::from(vec![0i16; count])),
+        ArrayType::Int => Value::new_object(collector, Reference::from(vec![0i32; count])),
+        ArrayType::Long => Value::new_object(collector, Reference::from(vec![0i64; count])),
+    };
+    stack.push(array)?;
+    Ok(Continue)
+}
+
+/// See: <https://docs.oracle.com/javase/specs/jvms/se25/html/jvms-6.html#jvms-6.5.anewarray>
+#[inline]
+pub(crate) async fn anewarray(
+    frame: &Frame,
+    stack: &mut OperandStack,
+    index: u16,
+) -> Result<ExecutionResult> {
+    let thread = frame.thread()?;
+    let constant_pool = frame.class().constant_pool();
+    let class_name = constant_pool.try_get_class(index)?;
+    let class_name_str = class_name.to_str_lossy();
+    let array_class_name = if class_name_str.starts_with('[') {
+        format!("[{class_name_str}")
+    } else {
+        format!("[L{class_name_str};")
+    };
+
+    let class = thread.class(array_class_name.as_str()).await?;
+    let count = stack.pop_int()?;
+    if count < 0 {
+        return Err(NegativeArraySizeException(count.to_string()).into());
+    }
+    let count = usize::try_from(count)?;
+    let vm = thread.vm()?;
+    let reference = Reference::try_from((class, vec![Value::Object(None); count]))?;
+    let array = Value::new_object(vm.garbage_collector(), reference);
+    stack.push(array)?;
+    Ok(Continue)
+}
+
+/// See: <https://docs.oracle.com/javase/specs/jvms/se25/html/jvms-6.html#jvms-6.5.arraylength>
+#[inline]
+pub(crate) fn arraylength(stack: &mut OperandStack) -> Result<ExecutionResult> {
+    let Some(reference) = stack.pop_object()? else {
+        return Err(NullPointerException(None).into());
+    };
+    let guard = reference.read();
+    let length = match &*guard {
+        Reference::BooleanArray(array) | Reference::ByteArray(array) => array.len(),
+        Reference::CharArray(array) => array.len(),
+        Reference::FloatArray(array) => array.len(),
+        Reference::DoubleArray(array) => array.len(),
+        Reference::ShortArray(array) => array.len(),
+        Reference::IntArray(array) => array.len(),
+        Reference::LongArray(array) => array.len(),
+        Reference::Array(object_array) => object_array.elements.len(),
+        object @ Reference::Object(_) => {
+            return Err(InvalidStackValue {
+                expected: "array".to_string(),
+                actual: object.to_string(),
+            });
+        }
+    };
+    stack.push_int(i32::try_from(length)?)?;
+    Ok(Continue)
+}
+
+/// See: <https://docs.oracle.com/javase/specs/jvms/se25/html/jvms-6.html#jvms-6.5.multianewarray>
+#[inline]
+pub(crate) async fn multianewarray(
+    frame: &Frame,
+    stack: &mut OperandStack,
+    index: u16,
+    dimensions: u8,
+) -> Result<ExecutionResult> {
+    let thread = frame.thread()?;
+    let constant_pool = frame.class().constant_pool();
+    let class_name = constant_pool.try_get_class(index)?;
+    let class = thread.class_java_str(class_name).await?;
+
+    // Pop dimension sizes from stack (in reverse order)
+    let mut dimension_sizes = Vec::new();
+    for _ in 0..dimensions {
+        let count = stack.pop_int()?;
+        if count < 0 {
+            return Err(NegativeArraySizeException(count.to_string()).into());
+        }
+        let count = usize::try_from(count)?;
+        dimension_sizes.push(count);
+    }
+    dimension_sizes.reverse();
+
+    // Create the nested array structure
+    // For multidimensional arrays, we need the base element type (strip all '[' prefixes)
+    let base_component_type = class.array_base_element_type();
+    let array =
+        create_multidimensional_array(&thread, base_component_type, &dimension_sizes, 0).await?;
+
+    stack.push(array)?;
+    Ok(Continue)
+}
+
+async fn create_multidimensional_array(
+    thread: &Thread,
+    component_type: &str,
+    dimension_sizes: &[usize],
+    depth: usize,
+) -> Result<Value> {
+    let current_size = *dimension_sizes
+        .get(depth)
+        .ok_or_else(|| InternalError(format!("Invalid array dimension depth: {depth}")))?;
+
+    if depth.checked_add(1) == Some(dimension_sizes.len()) {
+        // This is the innermost dimension; create the actual array
+        if component_type.len() == 1 {
+            // Primitive array
+            let base_type = BaseType::parse(component_type.chars().next().unwrap_or_default())?;
+            let vm = thread.vm()?;
+            let collector = vm.garbage_collector();
+            let array = match base_type {
+                BaseType::Char => {
+                    Value::new_object(collector, Reference::from(vec![0 as char; current_size]))
+                }
+                BaseType::Float => {
+                    Value::new_object(collector, Reference::from(vec![0.0f32; current_size]))
+                }
+                BaseType::Double => {
+                    Value::new_object(collector, Reference::from(vec![0.0f64; current_size]))
+                }
+                BaseType::Boolean | BaseType::Byte => {
+                    Value::new_object(collector, Reference::from(vec![0i8; current_size]))
+                }
+                BaseType::Short => {
+                    Value::new_object(collector, Reference::from(vec![0i16; current_size]))
+                }
+                BaseType::Int => {
+                    Value::new_object(collector, Reference::from(vec![0i32; current_size]))
+                }
+                BaseType::Long => {
+                    Value::new_object(collector, Reference::from(vec![0i64; current_size]))
+                }
+            };
+            Ok(array)
+        } else {
+            // Object array
+            let array_class_name = format!("[L{component_type};");
+            let array_class = thread.class(&array_class_name).await?;
+            let vm = thread.vm()?;
+            let reference =
+                Reference::try_from((array_class, vec![Value::Object(None); current_size]))?;
+            let array = Value::new_object(vm.garbage_collector(), reference);
+            Ok(array)
+        }
+    } else {
+        // This is not the innermost dimension; create array of arrays
+        let mut elements = Vec::new();
+        for _ in 0..current_size {
+            let sub_array = Box::pin(create_multidimensional_array(
+                thread,
+                component_type,
+                dimension_sizes,
+                depth + 1,
+            ))
+            .await?;
+            elements.push(sub_array);
+        }
+
+        // Build the array class name for this dimension
+        let mut array_class_name = "[".repeat(dimension_sizes.len() - depth);
+        if component_type.len() == 1 {
+            array_class_name.push_str(component_type);
+        } else {
+            array_class_name.push('L');
+            array_class_name.push_str(component_type);
+            array_class_name.push(';');
+        }
+
+        let array_class = thread.class(&array_class_name).await?;
+        let vm = thread.vm()?;
+        let reference = Reference::try_from((array_class, elements))?;
+        let array = Value::new_object(vm.garbage_collector(), reference);
+        Ok(array)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Error::JavaError;
+    use crate::frame::ExecutionResult::Continue;
+    use crate::java_object::JavaObject;
+    use ristretto_classfile::attributes::ArrayType;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn test_newarray_boolean() -> Result<()> {
+        let (_vm, _thread, frame) = crate::test::frame().await?;
+        let stack = &mut OperandStack::with_max_size(1);
+        stack.push_int(0)?;
+        let result = newarray(&frame, stack, &ArrayType::Boolean)?;
+        assert_eq!(Continue, result);
+        let object = stack.pop()?;
+        let reference = object.as_reference()?;
+        assert!(matches!(*reference, Reference::BooleanArray(_)));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_newarray_byte() -> Result<()> {
+        let (_vm, _thread, frame) = crate::test::frame().await?;
+        let stack = &mut OperandStack::with_max_size(1);
+        stack.push_int(0)?;
+        let result = newarray(&frame, stack, &ArrayType::Byte)?;
+        assert_eq!(Continue, result);
+        let object = stack.pop()?;
+        let reference = object.as_reference()?;
+        assert!(matches!(*reference, Reference::ByteArray(_)));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_newarray_char() -> Result<()> {
+        let (_vm, _thread, frame) = crate::test::frame().await?;
+        let stack = &mut OperandStack::with_max_size(1);
+        stack.push_int(0)?;
+        let result = newarray(&frame, stack, &ArrayType::Char)?;
+        assert_eq!(Continue, result);
+        let object = stack.pop()?;
+        let reference = object.as_reference()?;
+        assert!(matches!(*reference, Reference::CharArray(_)));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_newarray_double() -> Result<()> {
+        let (_vm, _thread, frame) = crate::test::frame().await?;
+        let stack = &mut OperandStack::with_max_size(1);
+        stack.push_int(0)?;
+        let result = newarray(&frame, stack, &ArrayType::Double)?;
+        assert_eq!(Continue, result);
+        let object = stack.pop()?;
+        let reference = object.as_reference()?;
+        assert!(matches!(*reference, Reference::DoubleArray(_)));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_newarray_float() -> Result<()> {
+        let (_vm, _thread, frame) = crate::test::frame().await?;
+        let stack = &mut OperandStack::with_max_size(1);
+        stack.push_int(0)?;
+        let result = newarray(&frame, stack, &ArrayType::Float)?;
+        assert_eq!(Continue, result);
+        let object = stack.pop()?;
+        let reference = object.as_reference()?;
+        assert!(matches!(*reference, Reference::FloatArray(_)));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_newarray_int() -> Result<()> {
+        let (_vm, _thread, frame) = crate::test::frame().await?;
+        let stack = &mut OperandStack::with_max_size(1);
+        stack.push_int(0)?;
+        let result = newarray(&frame, stack, &ArrayType::Int)?;
+        assert_eq!(Continue, result);
+        let object = stack.pop()?;
+        let reference = object.as_reference()?;
+        assert!(matches!(*reference, Reference::IntArray(_)));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_newarray_long() -> Result<()> {
+        let (_vm, _thread, frame) = crate::test::frame().await?;
+        let stack = &mut OperandStack::with_max_size(1);
+        stack.push_int(0)?;
+        let result = newarray(&frame, stack, &ArrayType::Long)?;
+        assert_eq!(Continue, result);
+        let object = stack.pop()?;
+        let reference = object.as_reference()?;
+        assert!(matches!(*reference, Reference::LongArray(_)));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_newarray_short() -> Result<()> {
+        let (_vm, _thread, frame) = crate::test::frame().await?;
+        let stack = &mut OperandStack::with_max_size(1);
+        stack.push_int(0)?;
+        let result = newarray(&frame, stack, &ArrayType::Short)?;
+        assert_eq!(Continue, result);
+        let object = stack.pop()?;
+        let reference = object.as_reference()?;
+        assert!(matches!(*reference, Reference::ShortArray(_)));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_anewarray() -> Result<()> {
+        let (_vm, _thread, mut frame) = crate::test::frame().await?;
+        let class = frame.class_mut();
+        let stack = &mut OperandStack::with_max_size(1);
+        let constant_pool = Arc::get_mut(class).expect("class").constant_pool_mut();
+        let class_index = constant_pool.add_class("java/lang/Object")?;
+        stack.push_int(0)?;
+        let result = anewarray(&frame, stack, class_index).await?;
+        assert_eq!(Continue, result);
+        let object = stack.pop()?;
+        let reference = object.as_reference()?;
+        assert_eq!("[Ljava/lang/Object;", reference.class_name()?);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_anewarray_of_arrays() -> Result<()> {
+        let (_vm, _thread, mut frame) = crate::test::frame().await?;
+        let class = frame.class_mut();
+        let stack = &mut OperandStack::with_max_size(1);
+        let constant_pool = Arc::get_mut(class).expect("class").constant_pool_mut();
+        let class_index = constant_pool.add_class("[Ljava/lang/Object;")?;
+        stack.push_int(0)?;
+        let result = anewarray(&frame, stack, class_index).await?;
+        assert_eq!(Continue, result);
+        let object = stack.pop()?;
+        let reference = object.as_reference()?;
+        assert_eq!("[[Ljava/lang/Object;", reference.class_name()?);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_arraylength_boolean() -> Result<()> {
+        let (_vm, _thread, frame) = crate::test::frame().await?;
+        let stack = &mut OperandStack::with_max_size(1);
+        stack.push_int(3)?;
+        let result = newarray(&frame, stack, &ArrayType::Boolean)?;
+        assert_eq!(Continue, result);
+        let result = arraylength(stack)?;
+        assert_eq!(Continue, result);
+        assert_eq!(3, stack.pop_int()?);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_arraylength_byte() -> Result<()> {
+        let (_vm, _thread, frame) = crate::test::frame().await?;
+        let stack = &mut OperandStack::with_max_size(1);
+        stack.push_int(3)?;
+        let result = newarray(&frame, stack, &ArrayType::Byte)?;
+        assert_eq!(Continue, result);
+        let result = arraylength(stack)?;
+        assert_eq!(Continue, result);
+        assert_eq!(3, stack.pop_int()?);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_arraylength_char() -> Result<()> {
+        let (_vm, _thread, frame) = crate::test::frame().await?;
+        let stack = &mut OperandStack::with_max_size(1);
+        stack.push_int(3)?;
+        let result = newarray(&frame, stack, &ArrayType::Char)?;
+        assert_eq!(Continue, result);
+        let result = arraylength(stack)?;
+        assert_eq!(Continue, result);
+        assert_eq!(3, stack.pop_int()?);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_arraylength_double() -> Result<()> {
+        let (_vm, _thread, frame) = crate::test::frame().await?;
+        let stack = &mut OperandStack::with_max_size(1);
+        stack.push_int(3)?;
+        let result = newarray(&frame, stack, &ArrayType::Double)?;
+        assert_eq!(Continue, result);
+        let result = arraylength(stack)?;
+        assert_eq!(Continue, result);
+        assert_eq!(3, stack.pop_int()?);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_arraylength_float() -> Result<()> {
+        let (_vm, _thread, frame) = crate::test::frame().await?;
+        let stack = &mut OperandStack::with_max_size(1);
+        stack.push_int(3)?;
+        let result = newarray(&frame, stack, &ArrayType::Float)?;
+        assert_eq!(Continue, result);
+        let result = arraylength(stack)?;
+        assert_eq!(Continue, result);
+        assert_eq!(3, stack.pop_int()?);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_arraylength_int() -> Result<()> {
+        let (_vm, _thread, frame) = crate::test::frame().await?;
+        let stack = &mut OperandStack::with_max_size(1);
+        stack.push_int(3)?;
+        let result = newarray(&frame, stack, &ArrayType::Int)?;
+        assert_eq!(Continue, result);
+        let result = arraylength(stack)?;
+        assert_eq!(Continue, result);
+        assert_eq!(3, stack.pop_int()?);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_arraylength_long() -> Result<()> {
+        let (_vm, _thread, frame) = crate::test::frame().await?;
+        let stack = &mut OperandStack::with_max_size(1);
+        stack.push_int(3)?;
+        let result = newarray(&frame, stack, &ArrayType::Long)?;
+        assert_eq!(Continue, result);
+        let result = arraylength(stack)?;
+        assert_eq!(Continue, result);
+        assert_eq!(3, stack.pop_int()?);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_arraylength_short() -> Result<()> {
+        let (_vm, _thread, frame) = crate::test::frame().await?;
+        let stack = &mut OperandStack::with_max_size(1);
+        stack.push_int(3)?;
+        let result = newarray(&frame, stack, &ArrayType::Short)?;
+        assert_eq!(Continue, result);
+        let result = arraylength(stack)?;
+        assert_eq!(Continue, result);
+        assert_eq!(3, stack.pop_int()?);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_arraylength_object() -> Result<()> {
+        let (_vm, _thread, mut frame) = crate::test::frame().await?;
+        let class = frame.class_mut();
+        let stack = &mut OperandStack::with_max_size(1);
+        let constant_pool = Arc::get_mut(class).expect("class").constant_pool_mut();
+        let class_index = constant_pool.add_class("java/lang/Object")?;
+        stack.push_int(3)?;
+        let result = anewarray(&frame, stack, class_index).await?;
+        assert_eq!(Continue, result);
+
+        let result = arraylength(stack)?;
+        assert_eq!(Continue, result);
+        assert_eq!(3, stack.pop_int()?);
+        Ok(())
+    }
+
+    #[test]
+    fn test_arraylength_null() -> Result<()> {
+        let stack = &mut OperandStack::with_max_size(1);
+        stack.push_object(None)?;
+        let result = arraylength(stack);
+        assert!(matches!(result, Err(JavaError(NullPointerException(None)))));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_arraylength_invalid_type() -> Result<()> {
+        let (_vm, thread) = crate::test::thread().await?;
+        let stack = &mut OperandStack::with_max_size(1);
+        let invalid_value = "foo".to_object(&thread).await?;
+        stack.push(invalid_value)?;
+        let result = arraylength(stack);
+        assert!(matches!(
+            result,
+            Err(InvalidStackValue {
+                expected,
+                actual
+            }) if expected == "array" && actual == "String(\"foo\")"
+        ));
+        Ok(())
+    }
+
+    async fn test_multianewarray_single_dimension(class_name: &str) -> Result<()> {
+        let (_vm, _thread, mut frame) = crate::test::frame().await?;
+        let class = frame.class_mut();
+        let stack = &mut OperandStack::with_max_size(1);
+        let constant_pool = Arc::get_mut(class).expect("class").constant_pool_mut();
+        let class_index = constant_pool.add_class(class_name)?;
+        stack.push_int(0)?;
+        let result = multianewarray(&frame, stack, class_index, 1).await?;
+        assert_eq!(Continue, result);
+        let object = stack.pop()?;
+        let reference = object.as_reference()?;
+        assert_eq!(class_name, reference.class_name()?);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_multianewarray_byte() -> Result<()> {
+        test_multianewarray_single_dimension("[B").await
+    }
+
+    #[tokio::test]
+    async fn test_multianewarray_char() -> Result<()> {
+        test_multianewarray_single_dimension("[C").await
+    }
+
+    #[tokio::test]
+    async fn test_multianewarray_short() -> Result<()> {
+        test_multianewarray_single_dimension("[S").await
+    }
+
+    #[tokio::test]
+    async fn test_multianewarray_int() -> Result<()> {
+        test_multianewarray_single_dimension("[I").await
+    }
+
+    #[tokio::test]
+    async fn test_multianewarray_long() -> Result<()> {
+        test_multianewarray_single_dimension("[J").await
+    }
+
+    #[tokio::test]
+    async fn test_multianewarray_float() -> Result<()> {
+        test_multianewarray_single_dimension("[F").await
+    }
+
+    #[tokio::test]
+    async fn test_multianewarray_double() -> Result<()> {
+        test_multianewarray_single_dimension("[D").await
+    }
+
+    #[tokio::test]
+    async fn test_multianewarray_object() -> Result<()> {
+        test_multianewarray_single_dimension("[Ljava/lang/Object;").await
+    }
+
+    #[tokio::test]
+    async fn test_multianewarray_multiple_dimensions() -> Result<()> {
+        let (_vm, _thread, mut frame) = crate::test::frame().await?;
+        let class = frame.class_mut();
+        let stack = &mut OperandStack::with_max_size(5);
+        let constant_pool = Arc::get_mut(class).expect("class").constant_pool_mut();
+        let class_name = "[[[[[I";
+        let class_index = constant_pool.add_class(class_name)?;
+        stack.push_int(1)?;
+        stack.push_int(2)?;
+        stack.push_int(3)?;
+        stack.push_int(4)?;
+        stack.push_int(5)?;
+        let result = multianewarray(&frame, stack, class_index, 5).await?;
+        assert_eq!(Continue, result);
+        let object = stack.pop()?;
+        let reference = object.as_reference()?;
+        assert_eq!(class_name, reference.class_name()?);
+        Ok(())
+    }
+}

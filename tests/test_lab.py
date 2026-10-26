@@ -169,6 +169,20 @@ class ArtifactTests(unittest.TestCase):
 
 
 class PublicationTests(unittest.TestCase):
+    def test_only_the_licensed_compiler_helpers_are_allowed(self):
+        self.assertEqual(len(check_public_tree.LICENSED_COMPILER_HELPERS), 5)
+        for path in check_public_tree.LICENSED_COMPILER_HELPERS:
+            self.assertFalse(check_public_tree.prohibited(path), path)
+            self.assertTrue(check_public_tree.prohibited(".local/" + path), path)
+        for path in [
+            "third_party/ristretto_vm/src/compiler/classes/net/minecraft/Client.class",
+            "third_party/ristretto_vm/src/compiler/classes/java/lang/Object.class",
+            "third_party/ristretto_vm/src/compiler/classes/org/ristretto/compiler/Other.class",
+            "third_party/ristretto_vm/src/compiler/java/org/ristretto/compiler/Other.java",
+            "third_party/ristretto_vm/minecraft.jar",
+        ]:
+            self.assertTrue(check_public_tree.prohibited(path), path)
+
     def test_private_paths_rejected(self):
         for path in [".local/minecraft/source.java", "decompiled/Foo.txt", "game.JAR", "capture.jfr", "source/Foo.java"]:
             self.assertTrue(check_public_tree.prohibited(path), path)

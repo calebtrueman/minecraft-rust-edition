@@ -1,0 +1,43 @@
+# Ristretto VM source and local changes
+
+This folder contains `ristretto_vm` 0.34.0, copied from the crates.io source package. The crate
+source has SHA-256 `169fe952ae44936e461e52fda3933060e00fc13dafdaf20e6c4e10604093cc3c` and records
+upstream Git commit `8448588ecfcedf79a59d697939493f289c1c6ad7`.
+
+- Upstream project: <https://github.com/theseus-rs/ristretto>
+- Crates.io version: <https://crates.io/crates/ristretto_vm/0.34.0>
+- License: `Apache-2.0 OR MIT`, as declared by the upstream package. The original license texts are
+  kept in `LICENSE-APACHE` and `LICENSE-MIT`.
+
+## Local change
+
+The upstream builder did not let a Rust application provide native Java methods. This copy adds
+`ConfigurationBuilder::register_native_method(signature, method)`. A host registers each callback
+before creating the VM. The signature is the Java class name, method name, and descriptor, such as
+`example/Bridge.add(II)I`. The callback runs only when that Java method is marked `native`; it can
+override Ristretto's built-in implementation for the same signature. Existing built-ins still serve
+other methods.
+
+The callback map is carried into the VM's method registry and used by method resolution, including
+the cached virtual and interface call paths. See the changes in `src/configuration/`,
+`src/intrinsic_methods/registry.rs`, `src/vm.rs`, `src/thread.rs`, `src/instruction/`, and
+`src/method_ref_cache.rs`.
+
+This adds a way for Rust code to answer selected Java native calls. It does not add JNI library
+loading, Fabric support, Minecraft classes, or bindings from Java mods to the Rust game and renderer.
+
+## Included compiled helper files
+
+These four upstream Java 8 compiler bridge helpers are embedded by `src/compiler/bridge.rs`; the
+upstream `src/compiler/README.md` explains how to regenerate them. Their hashes are recorded here
+for comparison with upstream. The public-tree check permits only these exact helper paths.
+That README's command was adjusted to use this repository's `third_party/ristretto_vm/` path.
+
+| Path under this folder | SHA-256 |
+|---|---|
+| `src/compiler/classes/org/ristretto/compiler/CompilerBridge.class` | `d7ad0eb41c9a19425784d763f40764e5f2d1d08ffc430c0ca5e3279160a7a627` |
+| `src/compiler/classes/org/ristretto/compiler/CompilerBridge$Source.class` | `ad3bbb3ea120a9f1b0587b7c3dfa3b3030d3238f1ddd9c2b55a022f531988dc8` |
+| `src/compiler/classes/org/ristretto/compiler/CompilerBridge$MemoryOutput.class` | `668bce5a4a79c20722ed1f2c10d922376e70f743ee0c130b796a2749b0a956e7` |
+| `src/compiler/classes/org/ristretto/compiler/CompilerBridge$MemoryFileManager.class` | `6f5d6ca000665400fcaba0f56add52ef0ed3fac198667f9b989df71f343a087f` |
+
+No JDK, Minecraft, Fabric, or other game's compiled classes are included.

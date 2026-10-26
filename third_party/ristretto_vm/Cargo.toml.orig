@@ -1,0 +1,97 @@
+[package]
+authors.workspace = true
+categories.workspace = true
+description = "Java Virtual Machine and compiler"
+edition.workspace = true
+keywords = ["java", "jvm"]
+license.workspace = true
+name = "ristretto_vm"
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[lib]
+name = "ristretto_vm"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+ahash = { workspace = true }
+async-recursion = { workspace = true }
+dashmap = { workspace = true }
+indexmap = { workspace = true }
+parking_lot = { workspace = true }
+portable-atomic = { workspace = true }
+ristretto_classfile = { path = "../ristretto_classfile", version = "0.34.0" }
+ristretto_classloader = { path = "../ristretto_classloader", version = "0.34.0", default-features = false }
+ristretto_gc = { path = "../ristretto_gc", version = "0.34.0" }
+ristretto_intrinsics = { path = "../ristretto_intrinsics", version = "0.34.0", default-features = false }
+ristretto_jit = { path = "../ristretto_jit", version = "0.34.0" }
+ristretto_macros = { path = "../ristretto_macros", version = "0.34.0" }
+ristretto_types = { path = "../ristretto_types", version = "0.34.0" }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+zerocopy = { workspace = true }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+tokio = { workspace = true, features = ["time"] }
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+rayon = { workspace = true }
+sysinfo = { workspace = true }
+tokio = { workspace = true, features = ["fs", "time"] }
+
+[target.'cfg(all(not(target_family = "wasm"), target_endian = "little", not(target_os = "dragonfly"), not(any(target_arch = "mips", target_arch = "mips64"))))'.dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+
+[dev-dependencies]
+criterion = { workspace = true }
+regex = { workspace = true }
+tempfile = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+walkdir = { workspace = true }
+
+[target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
+rayon = { workspace = true }
+ristretto_resolver = { path = "../ristretto_resolver", version = "0.34.0" }
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+
+[features]
+default = ["audio", "tls-rustls-ring"]
+audio = [
+    "ristretto_intrinsics/audio",
+]
+tls-native-tls = [
+    "ristretto_classloader/tls-native-tls",
+]
+tls-rustls-aws-lc-rs = [
+    "ristretto_classloader/tls-rustls-aws-lc-rs",
+]
+tls-rustls-ring = [
+    "ristretto_classloader/tls-rustls-ring",
+]
+startup-trace = []
+url = [
+    "ristretto_classloader/url",
+]
+
+[package.metadata.cargo-machete]
+ignored = [
+    # used by async functions in proc macros
+    "async-recursion",
+]
+
+[[bench]]
+harness = false
+name = "vm"
+
+[[bench]]
+harness = false
+name = "compiler"
+
+[[bench]]
+harness = false
+name = "intrinsics"

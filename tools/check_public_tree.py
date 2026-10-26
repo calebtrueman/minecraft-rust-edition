@@ -9,12 +9,22 @@ import sys
 PRIVATE_ROOTS = {".local", "decompiled", "minecraft", "assets", "run", "logs"}
 PRIVATE_EXTENSIONS = {".jar", ".class", ".jfr", ".hprof", ".java"}
 ORIGINAL_JDK_TOOLS = {"tools/JfrSummary.java", "tests/java/JfrFixture.java"}
+# Ristretto's own compiler helpers, licensed Apache-2.0 OR MIT. These exact
+# files are required by its Rust library. Their source, hashes and licenses
+# live beside the vendored dependency; no Minecraft or JDK classes are allowed.
+LICENSED_COMPILER_HELPERS = {
+    "third_party/ristretto_vm/src/compiler/java/org/ristretto/compiler/CompilerBridge.java",
+    "third_party/ristretto_vm/src/compiler/classes/org/ristretto/compiler/CompilerBridge.class",
+    "third_party/ristretto_vm/src/compiler/classes/org/ristretto/compiler/CompilerBridge$Source.class",
+    "third_party/ristretto_vm/src/compiler/classes/org/ristretto/compiler/CompilerBridge$MemoryOutput.class",
+    "third_party/ristretto_vm/src/compiler/classes/org/ristretto/compiler/CompilerBridge$MemoryFileManager.class",
+}
 
 
 def prohibited(path):
     parsed = PurePosixPath(path)
     # Original JDK-only tools are an exact allowlist; recovered game Java stays private.
-    if path in ORIGINAL_JDK_TOOLS:
+    if path in ORIGINAL_JDK_TOOLS or path in LICENSED_COMPILER_HELPERS:
         return False
     # Original Horizon mod sources may also be tracked.
     if parsed.suffix == ".java" and path.startswith(("mods/horizon/src/", "mods/horizon-lab/src/")):

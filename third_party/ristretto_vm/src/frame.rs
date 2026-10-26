@@ -1,0 +1,1344 @@
+use crate::Error::{InternalError, InvalidProgramCounter};
+
+use crate::field_ref_cache::FieldRefEntry;
+use crate::instruction::{
+    aaload, aastore, aconst_null, aload, aload_0, aload_1, aload_2, aload_3, aload_w, anewarray,
+    areturn, arraylength, astore, astore_0, astore_1, astore_2, astore_3, astore_w, athrow, baload,
+    bastore, bipush, breakpoint, caload, castore, checkcast, convert_error_to_throwable, d2f, d2i,
+    d2l, dadd, daload, dastore, dcmpg, dcmpl, dconst_0, dconst_1, ddiv, dload, dload_0, dload_1,
+    dload_2, dload_3, dload_w, dmul, dneg, drem, dreturn, dstore, dstore_0, dstore_1, dstore_2,
+    dstore_3, dstore_w, dsub, dup, dup_x1, dup_x2, dup2, dup2_x1, dup2_x2, f2d, f2i, f2l, fadd,
+    faload, fastore, fcmpg, fcmpl, fconst_0, fconst_1, fconst_2, fdiv, fload, fload_0, fload_1,
+    fload_2, fload_3, fload_w, fmul, fneg, frem, freturn, fstore, fstore_0, fstore_1, fstore_2,
+    fstore_3, fstore_w, fsub, getfield, getstatic, goto, goto_w, i2b, i2c, i2d, i2f, i2l, i2s,
+    iadd, iaload, iand, iastore, iconst_0, iconst_1, iconst_2, iconst_3, iconst_4, iconst_5,
+    iconst_m1, idiv, if_acmpeq, if_acmpne, if_icmpeq, if_icmpge, if_icmpgt, if_icmple, if_icmplt,
+    if_icmpne, ifeq, ifge, ifgt, ifle, iflt, ifne, ifnonnull, ifnull, iinc, iinc_w, iload, iload_0,
+    iload_1, iload_2, iload_3, iload_w, impdep1, impdep2, imul, ineg, instanceof, invokedynamic,
+    invokeinterface, invokespecial, invokestatic, invokevirtual, ior, irem, ireturn, ishl, ishr,
+    istore, istore_0, istore_1, istore_2, istore_3, istore_w, isub, iushr, ixor, jsr, jsr_w, l2d,
+    l2f, l2i, ladd, laload, land, lastore, lcmp, lconst_0, lconst_1, ldc, ldc_w, ldc2_w, ldiv,
+    lload, lload_0, lload_1, lload_2, lload_3, lload_w, lmul, lneg, lookupswitch, lor, lrem,
+    lreturn, lshl, lshr, lstore, lstore_0, lstore_1, lstore_2, lstore_3, lstore_w, lsub, lushr,
+    lxor, monitorenter, monitorexit, multianewarray, new, newarray, nop, pop, pop2,
+    process_throwable, putfield, putstatic, ret, ret_w, r#return, saload, sastore, sipush, swap,
+    tableswitch, wide,
+};
+use crate::method_ref_cache::MethodRefEntry;
+use crate::reference_cache::ClassReferences;
+use crate::{LocalVariables, OperandStack, Result, Thread};
+use ristretto_classfile::attributes::{Instruction, LookupSwitch, TableSwitch};
+use ristretto_classloader::{Class, Method, Value};
+use ristretto_types::JavaError::StackOverflowError;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock, Weak};
+use tracing::{Level, debug, event_enabled};
+
+/// Maximum number of bytecodes executed in one interpreter batch.
+pub(crate) const INSTRUCTION_BATCH_SIZE: usize = 256;
+
+/// Whether a call target has already been bound to its VM's intrinsic registry.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) enum IntrinsicBinding {
+    /// Host calls and other uncached paths still require a lookup.
+    #[default]
+    Unresolved,
+    /// Cached implementation or a cached miss for the actual target.
+    Resolved(Option<crate::intrinsic_methods::IntrinsicMethod>),
+}
+
+/// A resolved Java method invocation that the thread trampoline must dispatch.
+#[derive(Debug)]
+pub(crate) struct MethodCall {
+    pub(crate) class: Arc<Class>,
+    pub(crate) method: Arc<Method>,
+    /// Intrinsic selected for this VM and actual dispatch target.
+    pub(crate) intrinsic: IntrinsicBinding,
+    pub(crate) parameters: CallParameters,
+    pub(crate) has_return_type: bool,
+}
+
+impl PartialEq for MethodCall {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.class, &other.class)
+            && Arc::ptr_eq(&self.method, &other.method)
+            && self.parameters == other.parameters
+            && self.has_return_type == other.has_return_type
+    }
+}
+
+/// Represents the result of executing a JVM bytecode instruction.
+///
+/// # Overview
+///
+/// This enum is used to control the flow of execution within a frame. After each instruction is
+/// processed, an `ExecutionResult` is returned to indicate how the virtual machine should proceed.
+///
+/// # Variants
+///
+/// - `Return(Option<Value>)`: Indicates that the method execution should terminate and return the
+///   specified value (if any) to the caller. Methods with a void return type use `Return(None)`.
+///
+/// - `Continue`: Indicates that execution should continue with the next instruction (increments
+///   the program counter by 1).
+///
+/// - `ContinueAtPosition(usize)`: Indicates that execution should continue at the specified
+///   bytecode offset. Used for branch instructions like `goto`, `if_*`, and exception handlers.
+///
+/// # Usage
+///
+/// The VM's execution loop uses this enum to determine whether to proceed to the next instruction,
+/// jump to a different instruction, or return from the current method.
+#[derive(Debug, PartialEq)]
+pub(crate) enum ExecutionResult {
+    Return(Option<Value>),
+    Continue,
+    ContinueAtPosition(usize),
+    Call(MethodCall),
+}
+
+/// Async work is represented as bytecode data; no future is allocated by dispatch.
+#[derive(Debug)]
+pub(crate) enum InstructionResult {
+    Sync(ExecutionResult),
+    Async(Instruction),
+}
+
+/// Synchronous dispatch crosses into the async interpreter only at these boundaries.
+#[derive(Debug)]
+pub(crate) enum BatchExit {
+    Complete(ExecutionResult),
+    Async(Instruction),
+    Yield,
+    Fault(crate::Error),
+}
+
+/// A frame is created each time a method is invoked in the JVM.
+///
+/// # Overview
+/// A frame stores data and partial results, performs dynamic linking, returns method values, and
+/// dispatches exceptions. Each frame has its own array of local variables, its own operand stack,
+/// and a reference to the runtime constant pool of the class of the current method.
+///
+/// # Fields
+/// - `thread`: A weak reference to the thread that owns this frame
+/// - `class`: Reference to the class that contains the method being executed
+/// - `method`: Reference to the method being executed
+/// - `program_counter`: Current position in the bytecode
+///
+/// # Execution Model
+/// When a method is invoked, a new frame is created and pushed onto the JVM stack of the invoking
+/// thread. When the method completes (normally or abruptly), the frame is popped, and the invoker's
+/// frame becomes the current frame.
+///
+/// # Stack Effects
+/// The frame maintains two key data structures:
+/// - Local Variables: Used to pass parameters to methods and store local variables
+/// - Operand Stack: Used for storing intermediate computation results
+///
+/// # References
+///
+/// - [JVMS §2.6](https://docs.oracle.com/javase/specs/jvms/se25/html/jvms-2.html#jvms-2.6)
+#[derive(Debug)]
+pub struct Frame {
+    thread: Weak<Thread>,
+    class: Arc<Class>,
+    method: Arc<Method>,
+    program_counter: AtomicUsize,
+    method_refs: OnceLock<Arc<ClassReferences<MethodRefEntry>>>,
+    field_refs: OnceLock<Arc<ClassReferences<FieldRefEntry>>>,
+}
+
+#[derive(Debug)]
+pub(crate) struct FrameState {
+    pub(crate) locals: LocalVariables,
+    pub(crate) stack: OperandStack,
+}
+
+impl Default for FrameState {
+    fn default() -> Self {
+        Self {
+            locals: LocalVariables::with_max_size(0),
+            stack: OperandStack::with_max_size(0),
+        }
+    }
+}
+
+impl FrameState {
+    #[inline]
+    pub(crate) fn reset(
+        &mut self,
+        class: &Class,
+        method: &Method,
+        parameters: impl IntoIterator<Item = Value>,
+    ) -> Result<()> {
+        self.stack.reset(method.max_stack());
+        let slots = self.locals.reset(parameters, method.max_locals());
+        if slots > method.max_locals() {
+            return Err(InternalError(format!(
+                "Method parameters require {slots} local-variable slots, but {}.{}{} declares {}",
+                class.name(),
+                method.name(),
+                method.descriptor(),
+                method.max_locals()
+            )));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.locals.clear();
+        self.stack.clear();
+    }
+
+    pub(crate) fn capacity(&self) -> usize {
+        self.locals.capacity() + self.stack.capacity()
+    }
+}
+
+/// Cached calls leave arguments on the caller's stack until the dispatch boundary.
+#[derive(Debug, PartialEq)]
+pub(crate) enum CallParameters {
+    Owned(Vec<Value>),
+    Stack(usize),
+}
+
+impl From<Vec<Value>> for CallParameters {
+    fn from(values: Vec<Value>) -> Self {
+        Self::Owned(values)
+    }
+}
+
+impl CallParameters {
+    pub(crate) fn as_slice<'a>(&'a self, caller: Option<&'a FrameState>) -> Result<&'a [Value]> {
+        match self {
+            Self::Owned(values) => Ok(values),
+            Self::Stack(count) => Self::caller(caller)?.stack.last_values(*count),
+        }
+    }
+
+    fn caller(caller: Option<&FrameState>) -> Result<&FrameState> {
+        caller.ok_or_else(|| InternalError("Missing caller for stack arguments".to_owned()))
+    }
+
+    pub(crate) fn into_values(self, caller: Option<&mut FrameState>) -> Result<Vec<Value>> {
+        match self {
+            Self::Owned(values) => Ok(values),
+            Self::Stack(count) => {
+                let caller = caller.ok_or_else(|| {
+                    InternalError("Missing caller for stack arguments".to_owned())
+                })?;
+                Ok(caller.stack.drain_values(count)?.collect())
+            }
+        }
+    }
+
+    /// Transfer ownership directly into inline intrinsic argument storage.
+    pub(crate) fn into_parameters(
+        self,
+        caller: Option<&mut FrameState>,
+    ) -> Result<crate::Parameters> {
+        match self {
+            Self::Owned(values) => Ok(crate::Parameters::new(values)),
+            Self::Stack(count) => {
+                let caller = caller.ok_or_else(|| {
+                    InternalError("Missing caller for stack arguments".to_owned())
+                })?;
+                Ok(caller.stack.drain_values(count)?.collect())
+            }
+        }
+    }
+
+    #[inline]
+    pub(crate) fn initialize(
+        self,
+        state: &mut FrameState,
+        class: &Class,
+        method: &Method,
+        caller: Option<&mut FrameState>,
+    ) -> Result<()> {
+        match self {
+            Self::Owned(values) => state.reset(class, method, values),
+            Self::Stack(count) => {
+                let caller = caller.ok_or_else(|| {
+                    InternalError("Missing caller for stack arguments".to_owned())
+                })?;
+                state.reset(class, method, caller.stack.drain_values(count)?)
+            }
+        }
+    }
+}
+
+impl Frame {
+    /// Create a metadata-only frame for the specified class and method.
+    ///
+    /// JIT execution uses this frame for stack walking without allocating interpreter locals or an
+    /// operand stack. The thread owns interpreter storage separately.
+    pub fn new(thread: &Weak<Thread>, class: &Arc<Class>, method: &Arc<Method>) -> Self {
+        Frame {
+            thread: thread.clone(),
+            class: class.clone(),
+            method: method.clone(),
+            program_counter: AtomicUsize::new(0),
+            method_refs: OnceLock::new(),
+            field_refs: OnceLock::new(),
+        }
+    }
+
+    /// Reuse metadata only while its Arc is unique, so stack-walker snapshots remain stable.
+    pub(crate) fn reset(&mut self, class: &Arc<Class>, method: &Arc<Method>) {
+        if !Arc::ptr_eq(&self.class, class) {
+            self.method_refs.take();
+            self.field_refs.take();
+            self.class = class.clone();
+        }
+        if !Arc::ptr_eq(&self.method, method) {
+            self.method = method.clone();
+        }
+        self.program_counter.store(0, Ordering::Relaxed);
+    }
+
+    /// Get the thread that owns this frame.
+    pub fn thread(&self) -> Result<Arc<Thread>> {
+        match self.thread.upgrade() {
+            Some(thread) => Ok(thread),
+            None => Err(InternalError("Call stack is not available".to_string())),
+        }
+    }
+
+    /// Get the class that owns this frame.
+    pub fn class(&self) -> &Arc<Class> {
+        &self.class
+    }
+
+    /// Get a mutable reference to the class that owns this frame.
+    pub fn class_mut(&mut self) -> &mut Arc<Class> {
+        self.method_refs.take();
+        self.field_refs.take();
+        &mut self.class
+    }
+
+    #[inline]
+    pub(crate) fn method_refs(&self) -> Result<&ClassReferences<MethodRefEntry>> {
+        match self.method_refs.get() {
+            Some(entries) => Ok(entries),
+            None => self.initialize_method_refs(),
+        }
+    }
+
+    #[cold]
+    fn initialize_method_refs(&self) -> Result<&ClassReferences<MethodRefEntry>> {
+        let entries = self
+            .thread()?
+            .vm()?
+            .method_ref_cache()
+            .for_class(&self.class);
+        Ok(self.method_refs.get_or_init(|| entries))
+    }
+
+    #[inline]
+    pub(crate) fn field_refs(&self) -> Result<&ClassReferences<FieldRefEntry>> {
+        match self.field_refs.get() {
+            Some(entries) => Ok(entries),
+            None => self.initialize_field_refs(),
+        }
+    }
+
+    #[cold]
+    fn initialize_field_refs(&self) -> Result<&ClassReferences<FieldRefEntry>> {
+        let entries = self
+            .thread()?
+            .vm()?
+            .field_ref_cache()
+            .for_class(&self.class);
+        Ok(self.field_refs.get_or_init(|| entries))
+    }
+
+    /// Get the method in this frame.
+    pub fn method(&self) -> &Arc<Method> {
+        &self.method
+    }
+
+    /// Get the current program counter in this frame.
+    ///
+    /// The program counter represents the current position in the bytecode of the method
+    /// being executed. It's used to determine which instruction to execute next.
+    #[inline]
+    pub fn program_counter(&self) -> usize {
+        self.program_counter.load(Ordering::Relaxed)
+    }
+
+    /// Set the current program counter in this frame.
+    #[inline]
+    pub fn set_program_counter(&self, program_counter: usize) {
+        self.program_counter
+            .store(program_counter, Ordering::Relaxed);
+    }
+
+    /// Execute the method in this frame
+    ///
+    /// # Overview
+    ///
+    /// This method runs the bytecode instructions of the current method in the frame.
+    /// It sets up the local variables with the provided parameters, creates an operand
+    /// stack, and executes each instruction in sequence until the method returns or
+    /// an exception is thrown and not handled within the method.
+    ///
+    /// # Error Handling
+    ///
+    /// This method handles two types of errors:
+    /// 1. Java exceptions: When a Java exception is thrown, the method attempts to find
+    ///    an appropriate exception handler within the current method. If found, execution
+    ///    continues at the handler. If not, the exception is propagated to the caller.
+    /// 2. VM errors: Invalid program counter, stack overflow, etc. These are converted to
+    ///    Java exceptions where possible.
+    ///
+    /// # Bytecode Execution Process
+    ///
+    /// 1. Initialize local variables with the provided parameters
+    /// 2. Create an operand stack with the max stack size defined in the method
+    /// 3. For each instruction:
+    ///    - Load the instruction at the current program counter
+    ///    - Execute the instruction, which may modify locals and stack
+    ///    - Process the execution result (continue, jump, or return)
+    pub async fn execute(&self, parameters: Vec<Value>) -> Result<Option<Value>> {
+        let thread = self.thread()?;
+        thread.execute(&self.class, &self.method, &parameters).await
+    }
+
+    /// Execute a bounded batch of bytecodes, returning early for method calls or returns.
+    ///
+    /// The interpreter owns mutable state across the batch, including across async handlers.
+    /// The program counter remains current for exceptions and stack walking, and the thread's
+    /// instruction budget preserves cooperative scheduling across batches and method calls.
+    pub(crate) async fn execute_batch(
+        &self,
+        thread: &Thread,
+        state: &mut FrameState,
+    ) -> Result<ExecutionResult> {
+        let debug = event_enabled!(Level::DEBUG);
+        let mut remaining = INSTRUCTION_BATCH_SIZE;
+        while remaining != 0 {
+            let boundary = self.execute_sync_batch(thread, state, &mut remaining, debug)?;
+            match self.resume_batch(state, boundary).await? {
+                ExecutionResult::Continue => {}
+                result => return Ok(result),
+            }
+        }
+        Ok(ExecutionResult::Continue)
+    }
+
+    /// Resume a synchronous boundary with the stack unlocked, allowing Java reentry and
+    /// cancellation to use the ordinary frame-state lease.
+    pub(crate) async fn resume_batch(
+        &self,
+        state: &mut FrameState,
+        boundary: BatchExit,
+    ) -> Result<ExecutionResult> {
+        let pending = match boundary {
+            BatchExit::Complete(result) => return Ok(result),
+            BatchExit::Async(instruction) => Ok(InstructionResult::Async(instruction)),
+            BatchExit::Fault(error) => Err(error),
+            BatchExit::Yield => {
+                // The pending bytecode has already consumed budget, exactly as in ordinary
+                // dispatch. Its PC and operands remain unchanged until this yield resumes.
+                tokio::task::yield_now().await;
+                let pc = self.program_counter();
+                let instruction = self
+                    .method
+                    .code()
+                    .get(pc)
+                    .ok_or(InvalidProgramCounter(pc))?;
+                self.process(&mut state.locals, &mut state.stack, instruction)
+            }
+        };
+        let result = match pending {
+            Ok(InstructionResult::Sync(result)) => Ok(result),
+            Ok(InstructionResult::Async(instruction)) => {
+                // Loading/bootstrap work can re-enter Java execution. Keep the recursive
+                // future boundary here, reached only after a synchronous cache miss.
+                Box::pin(self.process_async(&mut state.stack, &instruction)).await
+            }
+            Err(error) => Err(error),
+        };
+
+        match result {
+            Ok(ExecutionResult::Continue) => {
+                self.program_counter
+                    .store(self.program_counter().wrapping_add(1), Ordering::Relaxed);
+                Ok(ExecutionResult::Continue)
+            }
+            Ok(ExecutionResult::ContinueAtPosition(next_program_counter)) => {
+                self.program_counter
+                    .store(next_program_counter, Ordering::Relaxed);
+                Ok(ExecutionResult::Continue)
+            }
+            Ok(result) => Ok(result),
+            Err(error) => {
+                Self::handle_error_with_stack(self, &mut state.stack, error).await?;
+                Ok(ExecutionResult::Continue)
+            }
+        }
+    }
+
+    pub(crate) fn execute_sync_batch(
+        &self,
+        thread: &Thread,
+        state: &mut FrameState,
+        remaining: &mut usize,
+        debug: bool,
+    ) -> Result<BatchExit> {
+        self.execute_sync_batch_with_budget(
+            &mut thread.instruction_budget(),
+            state,
+            remaining,
+            debug,
+        )
+    }
+
+    /// Keep ordinary bytecodes out of the async state machine. All opcodes use this dispatch
+    /// loop; no instruction sequences or workload-specific patterns are recognized.
+    #[inline(never)]
+    pub(crate) fn execute_sync_batch_with_budget(
+        &self,
+        budget: &mut crate::thread::InstructionBudget<'_>,
+        state: &mut FrameState,
+        remaining: &mut usize,
+        debug: bool,
+    ) -> Result<BatchExit> {
+        let code = self.method.code();
+        let FrameState { locals, stack } = state;
+        let mut pc = self.program_counter();
+        while *remaining != 0 {
+            let Some(instruction) = code.get(pc) else {
+                return Err(InvalidProgramCounter(pc));
+            };
+            if debug {
+                self.debug_execute(locals, stack, instruction)?;
+            }
+            *remaining -= 1;
+            if budget.record() {
+                return Ok(BatchExit::Yield);
+            }
+            match self.process(locals, stack, instruction) {
+                Ok(InstructionResult::Sync(ExecutionResult::Continue)) => pc += 1,
+                Ok(InstructionResult::Sync(ExecutionResult::ContinueAtPosition(next))) => pc = next,
+                Ok(InstructionResult::Sync(result)) => return Ok(BatchExit::Complete(result)),
+                Ok(InstructionResult::Async(instruction)) => {
+                    return Ok(BatchExit::Async(instruction));
+                }
+                Err(error) => return Ok(BatchExit::Fault(error)),
+            }
+            // Publish every instruction's next PC for stack walking and exception attribution.
+            self.program_counter.store(pc, Ordering::Relaxed);
+        }
+        Ok(BatchExit::Complete(ExecutionResult::Continue))
+    }
+
+    /// Resume this frame after a method call completes successfully.
+    pub(crate) fn complete_call(
+        &self,
+        state: &mut FrameState,
+        value: Option<Value>,
+        has_return_type: bool,
+    ) -> Result<()> {
+        if has_return_type && let Some(value) = value {
+            state.stack.push(value)?;
+        }
+        self.program_counter
+            .store(self.program_counter().wrapping_add(1), Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Deliver an error raised by a callee to this frame.
+    pub(crate) async fn handle_error(
+        &self,
+        state: &mut FrameState,
+        error: crate::Error,
+    ) -> Result<()> {
+        Self::handle_error_with_stack(self, &mut state.stack, error).await
+    }
+
+    async fn handle_error_with_stack(
+        frame: &Frame,
+        stack: &mut OperandStack,
+        error: crate::Error,
+    ) -> Result<()> {
+        let thread = frame.thread()?;
+        // The current frame may have consumed the entire configured Java stack. Every implicit
+        // throwable needs enough headroom to run its constructor without replacing the original
+        // error with a StackOverflowError.
+        let throwable = {
+            let _overflow_reserve = thread.stack_overflow_reserve();
+            convert_error_to_throwable(&thread, error).await?
+        };
+        let handler_program_counter = process_throwable(frame, stack, throwable).await?;
+        frame
+            .program_counter
+            .store(handler_program_counter, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Number of Java stack slots reserved by this frame.
+    pub(crate) fn stack_slots(&self) -> Result<usize> {
+        Self::stack_slots_for(&self.method)
+    }
+
+    /// Number of Java stack slots required by a method before its frame is allocated.
+    pub(crate) fn stack_slots_for(method: &Method) -> Result<usize> {
+        method
+            .max_locals()
+            .checked_add(method.max_stack())
+            .and_then(|slots| slots.checked_add(1))
+            .ok_or_else(|| StackOverflowError("Java stack slot count overflow".to_string()).into())
+    }
+
+    /// Debug the execution of an instruction in this frame
+    ///
+    /// # Overview
+    ///
+    /// This method logs detailed debug information about the current execution state
+    /// of the frame, including local variables, operand stack, program counter, and
+    /// the instruction about to be executed. It's only called when debug-level logging
+    /// is enabled.
+    ///
+    /// # Debug Output
+    ///
+    /// The method logs the following information:
+    /// - Class name, method name, method descriptor, and source file with line number (if available)
+    /// - Contents of the local variables array
+    /// - Current operand stack contents and remaining stack size
+    /// - Current program counter and formatted instruction string
+    ///
+    /// # Implementation Note
+    ///
+    /// This is only invoked when the debug log level is enabled, minimizing performance impact.
+    #[cold]
+    #[inline(never)]
+    fn debug_execute(
+        &self,
+        locals: &LocalVariables,
+        stack: &OperandStack,
+        instruction: &Instruction,
+    ) -> Result<()> {
+        let program_counter = self.program_counter();
+        let class_name = self.class.name();
+        let method_name = self.method.name();
+        let method_descriptor = self.method.descriptor();
+        let source = if let Some(source_file) = self.class.source_file() {
+            let line_number = self.method.line_number(program_counter);
+            format!(" ({source_file}:{line_number})")
+        } else {
+            String::new()
+        };
+        let constant_pool = self.class.constant_pool();
+        let instruction = instruction.to_formatted_string(constant_pool)?;
+        debug!("  frame: {class_name}.{method_name}{method_descriptor}{source}");
+        debug!("    locals: {locals}");
+        debug!("    stack: {stack}");
+        debug!("    pc: {program_counter}; instruction: {instruction}");
+        Ok(())
+    }
+
+    /// Construct concrete futures only for loading, initialization, or other async work.
+    pub(crate) async fn process_async(
+        &self,
+        stack: &mut OperandStack,
+        instruction: &Instruction,
+    ) -> Result<ExecutionResult> {
+        match instruction {
+            Instruction::Getstatic(index) => getstatic(self, stack, *index).await,
+            Instruction::Putstatic(index) => putstatic(self, stack, *index).await,
+            Instruction::Getfield(index) => getfield(self, stack, *index).await,
+            Instruction::Putfield(index) => putfield(self, stack, *index).await,
+            Instruction::Invokevirtual(index) => invokevirtual(self, stack, *index).await,
+            Instruction::Invokespecial(index) => invokespecial(self, stack, *index).await,
+            Instruction::Invokestatic(index) => invokestatic(self, stack, *index).await,
+            Instruction::Invokeinterface(index, count) => {
+                invokeinterface(self, stack, *index, *count).await
+            }
+            Instruction::Invokedynamic(index) => invokedynamic(self, stack, *index).await,
+            Instruction::New(index) => new(self, stack, *index).await,
+            Instruction::Anewarray(index) => anewarray(self, stack, *index).await,
+            Instruction::Athrow => athrow(stack).await,
+            Instruction::Checkcast(index) => checkcast(self, stack, *index).await,
+            Instruction::Instanceof(index) => instanceof(self, stack, *index).await,
+            Instruction::Monitorenter => monitorenter(self, stack).await,
+            Instruction::Monitorexit => monitorexit(self, stack).await,
+            Instruction::Multianewarray(index, dimensions) => {
+                multianewarray(self, stack, *index, *dimensions).await
+            }
+            Instruction::Ldc(index) => {
+                crate::instruction::load_constant_async(self, stack, u16::from(*index)).await
+            }
+            Instruction::Ldc_w(index) => {
+                crate::instruction::load_constant_async(self, stack, *index).await
+            }
+            _ => Err(InternalError(format!(
+                "Unexpected slow instruction: {instruction:?}"
+            ))),
+        }
+    }
+
+    /// This method is responsible for executing a single JVM bytecode instruction within the current frame.
+    /// It dispatches the instruction to the appropriate handler function based on its opcode and
+    /// manages the modification of the local variables and operand stack.
+    ///
+    /// # Error Handling
+    ///
+    /// If an instruction throws an exception (either explicitly via `athrow` or due to an error
+    /// condition), this method returns an `Err` that will be handled by the caller (`execute`
+    /// method).
+    ///
+    /// # Implementation Note
+    ///
+    /// This method uses a large match statement to dispatch each instruction to its
+    /// specialized handler function. The JVM specification defines over 200 bytecode
+    /// instructions, and this method handles all of them.
+    ///
+    /// # References
+    ///
+    /// - [JVMS §6](https://docs.oracle.com/javase/specs/jvms/se25/html/jvms-6.html)
+    #[expect(clippy::too_many_lines)]
+    #[expect(
+        clippy::inline_always,
+        reason = "Dispatch must merge into the synchronous loop to eliminate per-bytecode result copies"
+    )]
+    #[inline(always)]
+    fn process(
+        &self,
+        locals: &mut LocalVariables,
+        stack: &mut OperandStack,
+        instruction: &Instruction,
+    ) -> Result<InstructionResult> {
+        match instruction {
+            Instruction::Nop => nop().map(InstructionResult::Sync),
+            Instruction::Aconst_null => aconst_null(stack).map(InstructionResult::Sync),
+            Instruction::Iconst_m1 => iconst_m1(stack).map(InstructionResult::Sync),
+            Instruction::Iconst_0 => iconst_0(stack).map(InstructionResult::Sync),
+            Instruction::Iconst_1 => iconst_1(stack).map(InstructionResult::Sync),
+            Instruction::Iconst_2 => iconst_2(stack).map(InstructionResult::Sync),
+            Instruction::Iconst_3 => iconst_3(stack).map(InstructionResult::Sync),
+            Instruction::Iconst_4 => iconst_4(stack).map(InstructionResult::Sync),
+            Instruction::Iconst_5 => iconst_5(stack).map(InstructionResult::Sync),
+            Instruction::Lconst_0 => lconst_0(stack).map(InstructionResult::Sync),
+            Instruction::Lconst_1 => lconst_1(stack).map(InstructionResult::Sync),
+            Instruction::Fconst_0 => fconst_0(stack).map(InstructionResult::Sync),
+            Instruction::Fconst_1 => fconst_1(stack).map(InstructionResult::Sync),
+            Instruction::Fconst_2 => fconst_2(stack).map(InstructionResult::Sync),
+            Instruction::Dconst_0 => dconst_0(stack).map(InstructionResult::Sync),
+            Instruction::Dconst_1 => dconst_1(stack).map(InstructionResult::Sync),
+            Instruction::Bipush(value) => bipush(stack, *value).map(InstructionResult::Sync),
+            Instruction::Sipush(value) => sipush(stack, *value).map(InstructionResult::Sync),
+            Instruction::Ldc(index) => ldc(self, stack, *index),
+            Instruction::Ldc_w(index) => ldc_w(self, stack, *index),
+            Instruction::Ldc2_w(index) => ldc2_w(self, stack, *index).map(InstructionResult::Sync),
+            Instruction::Iload(index) => iload(locals, stack, *index).map(InstructionResult::Sync),
+            Instruction::Lload(index) => lload(locals, stack, *index).map(InstructionResult::Sync),
+            Instruction::Fload(index) => fload(locals, stack, *index).map(InstructionResult::Sync),
+            Instruction::Dload(index) => dload(locals, stack, *index).map(InstructionResult::Sync),
+            Instruction::Aload(index) => aload(locals, stack, *index).map(InstructionResult::Sync),
+            Instruction::Iload_0 => iload_0(locals, stack).map(InstructionResult::Sync),
+            Instruction::Iload_1 => iload_1(locals, stack).map(InstructionResult::Sync),
+            Instruction::Iload_2 => iload_2(locals, stack).map(InstructionResult::Sync),
+            Instruction::Iload_3 => iload_3(locals, stack).map(InstructionResult::Sync),
+            Instruction::Lload_0 => lload_0(locals, stack).map(InstructionResult::Sync),
+            Instruction::Lload_1 => lload_1(locals, stack).map(InstructionResult::Sync),
+            Instruction::Lload_2 => lload_2(locals, stack).map(InstructionResult::Sync),
+            Instruction::Lload_3 => lload_3(locals, stack).map(InstructionResult::Sync),
+            Instruction::Fload_0 => fload_0(locals, stack).map(InstructionResult::Sync),
+            Instruction::Fload_1 => fload_1(locals, stack).map(InstructionResult::Sync),
+            Instruction::Fload_2 => fload_2(locals, stack).map(InstructionResult::Sync),
+            Instruction::Fload_3 => fload_3(locals, stack).map(InstructionResult::Sync),
+            Instruction::Dload_0 => dload_0(locals, stack).map(InstructionResult::Sync),
+            Instruction::Dload_1 => dload_1(locals, stack).map(InstructionResult::Sync),
+            Instruction::Dload_2 => dload_2(locals, stack).map(InstructionResult::Sync),
+            Instruction::Dload_3 => dload_3(locals, stack).map(InstructionResult::Sync),
+            Instruction::Aload_0 => aload_0(locals, stack).map(InstructionResult::Sync),
+            Instruction::Aload_1 => aload_1(locals, stack).map(InstructionResult::Sync),
+            Instruction::Aload_2 => aload_2(locals, stack).map(InstructionResult::Sync),
+            Instruction::Aload_3 => aload_3(locals, stack).map(InstructionResult::Sync),
+            Instruction::Iaload => iaload(stack).map(InstructionResult::Sync),
+            Instruction::Laload => laload(stack).map(InstructionResult::Sync),
+            Instruction::Faload => faload(stack).map(InstructionResult::Sync),
+            Instruction::Daload => daload(stack).map(InstructionResult::Sync),
+            Instruction::Aaload => aaload(stack).map(InstructionResult::Sync),
+            Instruction::Baload => baload(stack).map(InstructionResult::Sync),
+            Instruction::Caload => caload(stack).map(InstructionResult::Sync),
+            Instruction::Saload => saload(stack).map(InstructionResult::Sync),
+            Instruction::Istore(index) => {
+                istore(locals, stack, *index).map(InstructionResult::Sync)
+            }
+            Instruction::Lstore(index) => {
+                lstore(locals, stack, *index).map(InstructionResult::Sync)
+            }
+            Instruction::Fstore(index) => {
+                fstore(locals, stack, *index).map(InstructionResult::Sync)
+            }
+            Instruction::Dstore(index) => {
+                dstore(locals, stack, *index).map(InstructionResult::Sync)
+            }
+            Instruction::Astore(index) => {
+                astore(locals, stack, *index).map(InstructionResult::Sync)
+            }
+            Instruction::Istore_0 => istore_0(locals, stack).map(InstructionResult::Sync),
+            Instruction::Istore_1 => istore_1(locals, stack).map(InstructionResult::Sync),
+            Instruction::Istore_2 => istore_2(locals, stack).map(InstructionResult::Sync),
+            Instruction::Istore_3 => istore_3(locals, stack).map(InstructionResult::Sync),
+            Instruction::Lstore_0 => lstore_0(locals, stack).map(InstructionResult::Sync),
+            Instruction::Lstore_1 => lstore_1(locals, stack).map(InstructionResult::Sync),
+            Instruction::Lstore_2 => lstore_2(locals, stack).map(InstructionResult::Sync),
+            Instruction::Lstore_3 => lstore_3(locals, stack).map(InstructionResult::Sync),
+            Instruction::Fstore_0 => fstore_0(locals, stack).map(InstructionResult::Sync),
+            Instruction::Fstore_1 => fstore_1(locals, stack).map(InstructionResult::Sync),
+            Instruction::Fstore_2 => fstore_2(locals, stack).map(InstructionResult::Sync),
+            Instruction::Fstore_3 => fstore_3(locals, stack).map(InstructionResult::Sync),
+            Instruction::Dstore_0 => dstore_0(locals, stack).map(InstructionResult::Sync),
+            Instruction::Dstore_1 => dstore_1(locals, stack).map(InstructionResult::Sync),
+            Instruction::Dstore_2 => dstore_2(locals, stack).map(InstructionResult::Sync),
+            Instruction::Dstore_3 => dstore_3(locals, stack).map(InstructionResult::Sync),
+            Instruction::Astore_0 => astore_0(locals, stack).map(InstructionResult::Sync),
+            Instruction::Astore_1 => astore_1(locals, stack).map(InstructionResult::Sync),
+            Instruction::Astore_2 => astore_2(locals, stack).map(InstructionResult::Sync),
+            Instruction::Astore_3 => astore_3(locals, stack).map(InstructionResult::Sync),
+            Instruction::Iastore => iastore(stack).map(InstructionResult::Sync),
+            Instruction::Lastore => lastore(stack).map(InstructionResult::Sync),
+            Instruction::Fastore => fastore(stack).map(InstructionResult::Sync),
+            Instruction::Dastore => dastore(stack).map(InstructionResult::Sync),
+            Instruction::Aastore => aastore(stack).map(InstructionResult::Sync),
+            Instruction::Bastore => bastore(stack).map(InstructionResult::Sync),
+            Instruction::Castore => castore(stack).map(InstructionResult::Sync),
+            Instruction::Sastore => sastore(stack).map(InstructionResult::Sync),
+            Instruction::Pop => pop(stack).map(InstructionResult::Sync),
+            Instruction::Pop2 => pop2(stack).map(InstructionResult::Sync),
+            Instruction::Dup => dup(stack).map(InstructionResult::Sync),
+            Instruction::Dup_x1 => dup_x1(stack).map(InstructionResult::Sync),
+            Instruction::Dup_x2 => dup_x2(stack).map(InstructionResult::Sync),
+            Instruction::Dup2 => dup2(stack).map(InstructionResult::Sync),
+            Instruction::Dup2_x1 => dup2_x1(stack).map(InstructionResult::Sync),
+            Instruction::Dup2_x2 => dup2_x2(stack).map(InstructionResult::Sync),
+            Instruction::Swap => swap(stack).map(InstructionResult::Sync),
+            Instruction::Iadd => iadd(stack).map(InstructionResult::Sync),
+            Instruction::Ladd => ladd(stack).map(InstructionResult::Sync),
+            Instruction::Fadd => fadd(stack).map(InstructionResult::Sync),
+            Instruction::Dadd => dadd(stack).map(InstructionResult::Sync),
+            Instruction::Isub => isub(stack).map(InstructionResult::Sync),
+            Instruction::Lsub => lsub(stack).map(InstructionResult::Sync),
+            Instruction::Fsub => fsub(stack).map(InstructionResult::Sync),
+            Instruction::Dsub => dsub(stack).map(InstructionResult::Sync),
+            Instruction::Imul => imul(stack).map(InstructionResult::Sync),
+            Instruction::Lmul => lmul(stack).map(InstructionResult::Sync),
+            Instruction::Fmul => fmul(stack).map(InstructionResult::Sync),
+            Instruction::Dmul => dmul(stack).map(InstructionResult::Sync),
+            Instruction::Idiv => idiv(stack).map(InstructionResult::Sync),
+            Instruction::Ldiv => ldiv(stack).map(InstructionResult::Sync),
+            Instruction::Fdiv => fdiv(stack).map(InstructionResult::Sync),
+            Instruction::Ddiv => ddiv(stack).map(InstructionResult::Sync),
+            Instruction::Irem => irem(stack).map(InstructionResult::Sync),
+            Instruction::Lrem => lrem(stack).map(InstructionResult::Sync),
+            Instruction::Frem => frem(stack).map(InstructionResult::Sync),
+            Instruction::Drem => drem(stack).map(InstructionResult::Sync),
+            Instruction::Ineg => ineg(stack).map(InstructionResult::Sync),
+            Instruction::Lneg => lneg(stack).map(InstructionResult::Sync),
+            Instruction::Fneg => fneg(stack).map(InstructionResult::Sync),
+            Instruction::Dneg => dneg(stack).map(InstructionResult::Sync),
+            Instruction::Ishl => ishl(stack).map(InstructionResult::Sync),
+            Instruction::Lshl => lshl(stack).map(InstructionResult::Sync),
+            Instruction::Ishr => ishr(stack).map(InstructionResult::Sync),
+            Instruction::Lshr => lshr(stack).map(InstructionResult::Sync),
+            Instruction::Iushr => iushr(stack).map(InstructionResult::Sync),
+            Instruction::Lushr => lushr(stack).map(InstructionResult::Sync),
+            Instruction::Iand => iand(stack).map(InstructionResult::Sync),
+            Instruction::Land => land(stack).map(InstructionResult::Sync),
+            Instruction::Ior => ior(stack).map(InstructionResult::Sync),
+            Instruction::Lor => lor(stack).map(InstructionResult::Sync),
+            Instruction::Ixor => ixor(stack).map(InstructionResult::Sync),
+            Instruction::Lxor => lxor(stack).map(InstructionResult::Sync),
+            Instruction::Iinc(index, constant) => {
+                iinc(locals, *index, *constant).map(InstructionResult::Sync)
+            }
+            Instruction::I2l => i2l(stack).map(InstructionResult::Sync),
+            Instruction::I2f => i2f(stack).map(InstructionResult::Sync),
+            Instruction::I2d => i2d(stack).map(InstructionResult::Sync),
+            Instruction::L2i => l2i(stack).map(InstructionResult::Sync),
+            Instruction::L2f => l2f(stack).map(InstructionResult::Sync),
+            Instruction::L2d => l2d(stack).map(InstructionResult::Sync),
+            Instruction::F2i => f2i(stack).map(InstructionResult::Sync),
+            Instruction::F2l => f2l(stack).map(InstructionResult::Sync),
+            Instruction::F2d => f2d(stack).map(InstructionResult::Sync),
+            Instruction::D2i => d2i(stack).map(InstructionResult::Sync),
+            Instruction::D2l => d2l(stack).map(InstructionResult::Sync),
+            Instruction::D2f => d2f(stack).map(InstructionResult::Sync),
+            Instruction::I2b => i2b(stack).map(InstructionResult::Sync),
+            Instruction::I2c => i2c(stack).map(InstructionResult::Sync),
+            Instruction::I2s => i2s(stack).map(InstructionResult::Sync),
+            Instruction::Lcmp => lcmp(stack).map(InstructionResult::Sync),
+            Instruction::Fcmpl => fcmpl(stack).map(InstructionResult::Sync),
+            Instruction::Fcmpg => fcmpg(stack).map(InstructionResult::Sync),
+            Instruction::Dcmpl => dcmpl(stack).map(InstructionResult::Sync),
+            Instruction::Dcmpg => dcmpg(stack).map(InstructionResult::Sync),
+            Instruction::Ifeq(address) => ifeq(stack, *address).map(InstructionResult::Sync),
+            Instruction::Ifne(address) => ifne(stack, *address).map(InstructionResult::Sync),
+            Instruction::Iflt(address) => iflt(stack, *address).map(InstructionResult::Sync),
+            Instruction::Ifge(address) => ifge(stack, *address).map(InstructionResult::Sync),
+            Instruction::Ifgt(address) => ifgt(stack, *address).map(InstructionResult::Sync),
+            Instruction::Ifle(address) => ifle(stack, *address).map(InstructionResult::Sync),
+            Instruction::If_icmpeq(address) => {
+                if_icmpeq(stack, *address).map(InstructionResult::Sync)
+            }
+            Instruction::If_icmpne(address) => {
+                if_icmpne(stack, *address).map(InstructionResult::Sync)
+            }
+            Instruction::If_icmplt(address) => {
+                if_icmplt(stack, *address).map(InstructionResult::Sync)
+            }
+            Instruction::If_icmpge(address) => {
+                if_icmpge(stack, *address).map(InstructionResult::Sync)
+            }
+            Instruction::If_icmpgt(address) => {
+                if_icmpgt(stack, *address).map(InstructionResult::Sync)
+            }
+            Instruction::If_icmple(address) => {
+                if_icmple(stack, *address).map(InstructionResult::Sync)
+            }
+            Instruction::If_acmpeq(address) => {
+                if_acmpeq(stack, *address).map(InstructionResult::Sync)
+            }
+            Instruction::If_acmpne(address) => {
+                if_acmpne(stack, *address).map(InstructionResult::Sync)
+            }
+            Instruction::Goto(address) => goto(*address).map(InstructionResult::Sync),
+            Instruction::Jsr(address) => jsr(stack, *address).map(InstructionResult::Sync),
+            Instruction::Ret(index) => ret(locals, *index).map(InstructionResult::Sync),
+            Instruction::Tableswitch(table_switch) => {
+                let TableSwitch {
+                    default,
+                    low,
+                    high,
+                    offsets,
+                } = table_switch.as_ref();
+                let program_counter = self.program_counter.load(Ordering::Relaxed);
+                tableswitch(stack, program_counter, *default, *low, *high, offsets)
+                    .map(InstructionResult::Sync)
+            }
+            Instruction::Lookupswitch(lookup_switch) => {
+                let LookupSwitch { default, pairs } = lookup_switch.as_ref();
+                let program_counter = self.program_counter.load(Ordering::Relaxed);
+                lookupswitch(stack, program_counter, *default, pairs).map(InstructionResult::Sync)
+            }
+            Instruction::Ireturn => ireturn(stack).map(InstructionResult::Sync),
+            Instruction::Lreturn => lreturn(stack).map(InstructionResult::Sync),
+            Instruction::Freturn => freturn(stack).map(InstructionResult::Sync),
+            Instruction::Dreturn => dreturn(stack).map(InstructionResult::Sync),
+            Instruction::Areturn => areturn(stack).map(InstructionResult::Sync),
+            Instruction::Return => r#return().map(InstructionResult::Sync),
+            Instruction::Getstatic(index)
+            | Instruction::Putstatic(index)
+            | Instruction::Getfield(index)
+            | Instruction::Putfield(index) => {
+                match crate::instruction::try_field(self, stack, *index, instruction)? {
+                    Some(result) => Ok(InstructionResult::Sync(result)),
+                    None => Ok(InstructionResult::Async(instruction.clone())),
+                }
+            }
+            Instruction::Invokevirtual(index)
+            | Instruction::Invokespecial(index)
+            | Instruction::Invokestatic(index)
+            | Instruction::Invokeinterface(index, _) => {
+                use crate::method_ref_cache::InvokeKind;
+                let kind = match instruction {
+                    Instruction::Invokevirtual(_) => InvokeKind::Virtual,
+                    Instruction::Invokespecial(_) => InvokeKind::Special,
+                    Instruction::Invokestatic(_) => InvokeKind::Static,
+                    _ => InvokeKind::Interface,
+                };
+                match crate::instruction::try_invoke(self, stack, *index, kind)? {
+                    Some(result) => Ok(InstructionResult::Sync(result)),
+                    None => Ok(InstructionResult::Async(instruction.clone())),
+                }
+            }
+            Instruction::Newarray(array_type) => {
+                newarray(self, stack, array_type).map(InstructionResult::Sync)
+            }
+            Instruction::Arraylength => arraylength(stack).map(InstructionResult::Sync),
+            Instruction::Wide => wide().map(InstructionResult::Sync),
+            Instruction::Invokedynamic(_)
+            | Instruction::New(_)
+            | Instruction::Anewarray(_)
+            | Instruction::Athrow
+            | Instruction::Checkcast(_)
+            | Instruction::Instanceof(_)
+            | Instruction::Monitorenter
+            | Instruction::Monitorexit
+            | Instruction::Multianewarray(_, _) => {
+                Ok(InstructionResult::Async(instruction.clone()))
+            }
+            Instruction::Ifnull(address) => ifnull(stack, *address).map(InstructionResult::Sync),
+            Instruction::Ifnonnull(address) => {
+                ifnonnull(stack, *address).map(InstructionResult::Sync)
+            }
+            Instruction::Goto_w(address) => goto_w(*address).map(InstructionResult::Sync),
+            Instruction::Jsr_w(address) => jsr_w(stack, *address).map(InstructionResult::Sync),
+            Instruction::Breakpoint => breakpoint().map(InstructionResult::Sync),
+            Instruction::Impdep1 => impdep1().map(InstructionResult::Sync),
+            Instruction::Impdep2 => impdep2().map(InstructionResult::Sync),
+            // Wide instructions
+            Instruction::Iload_w(index) => {
+                iload_w(locals, stack, *index).map(InstructionResult::Sync)
+            }
+            Instruction::Lload_w(index) => {
+                lload_w(locals, stack, *index).map(InstructionResult::Sync)
+            }
+            Instruction::Fload_w(index) => {
+                fload_w(locals, stack, *index).map(InstructionResult::Sync)
+            }
+            Instruction::Dload_w(index) => {
+                dload_w(locals, stack, *index).map(InstructionResult::Sync)
+            }
+            Instruction::Aload_w(index) => {
+                aload_w(locals, stack, *index).map(InstructionResult::Sync)
+            }
+            Instruction::Istore_w(index) => {
+                istore_w(locals, stack, *index).map(InstructionResult::Sync)
+            }
+            Instruction::Lstore_w(index) => {
+                lstore_w(locals, stack, *index).map(InstructionResult::Sync)
+            }
+            Instruction::Fstore_w(index) => {
+                fstore_w(locals, stack, *index).map(InstructionResult::Sync)
+            }
+            Instruction::Dstore_w(index) => {
+                dstore_w(locals, stack, *index).map(InstructionResult::Sync)
+            }
+            Instruction::Astore_w(index) => {
+                astore_w(locals, stack, *index).map(InstructionResult::Sync)
+            }
+            Instruction::Iinc_w(index, constant) => {
+                iinc_w(locals, *index, *constant).map(InstructionResult::Sync)
+            }
+            Instruction::Ret_w(index) => ret_w(locals, *index).map(InstructionResult::Sync),
+        }
+    }
+}
+
+impl ristretto_types::Frame for Frame {
+    fn class(&self) -> &Arc<Class> {
+        &self.class
+    }
+
+    fn method(&self) -> &Arc<Method> {
+        &self.method
+    }
+
+    fn program_counter(&self) -> usize {
+        self.program_counter.load(Ordering::Relaxed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::VM;
+    use crate::configuration::ConfigurationBuilder;
+    use crate::thread::Thread;
+    use ristretto_classfile::attributes::Attribute;
+    use ristretto_classfile::{ClassFile, ConstantPool, MethodAccessFlags};
+    use ristretto_classloader::ClassPath;
+    use std::path::PathBuf;
+    use std::task::{Context, Waker};
+
+    fn batch_test_frame(
+        code: impl FnOnce(u16) -> Vec<Instruction>,
+    ) -> Result<(Arc<Thread>, Frame, FrameState)> {
+        let mut constant_pool = ConstantPool::default();
+        let this_class = constant_pool.add_class("BatchTest")?;
+        let name_index = constant_pool.add_utf8("test")?;
+        let descriptor_index = constant_pool.add_utf8("(I)I")?;
+        let code_index = constant_pool.add_utf8("Code")?;
+        let class = Class::from(
+            None,
+            ClassFile {
+                constant_pool,
+                this_class,
+                methods: vec![ristretto_classfile::Method {
+                    access_flags: MethodAccessFlags::PUBLIC | MethodAccessFlags::STATIC,
+                    name_index,
+                    descriptor_index,
+                    attributes: vec![Attribute::Code {
+                        name_index: code_index,
+                        max_stack: 2,
+                        max_locals: 1,
+                        code: code(this_class),
+                        exception_table: Vec::new(),
+                        attributes: Vec::new(),
+                    }],
+                }],
+                ..Default::default()
+            },
+        )?;
+        let thread = Thread::new(&Weak::new(), 1);
+        let method = class.try_get_method("test", "(I)I")?;
+        let frame = Frame::new(&Arc::downgrade(&thread), &class, &method);
+        let mut state = FrameState::default();
+        state.reset(&class, &method, [Value::Int(1_000)])?;
+        Ok((thread, frame, state))
+    }
+
+    #[test]
+    fn test_synchronous_batch_commits_budget_on_fault_and_invalid_pc() -> Result<()> {
+        let (thread, frame, mut state) =
+            batch_test_frame(|_| vec![Instruction::Iconst_1, Instruction::Pop, Instruction::Pop])?;
+        let mut remaining = INSTRUCTION_BATCH_SIZE;
+        assert!(matches!(
+            frame.execute_sync_batch(&thread, &mut state, &mut remaining, false)?,
+            BatchExit::Fault(crate::Error::OperandStackUnderflow)
+        ));
+        assert_eq!(3, thread.instruction_count());
+        assert_eq!(2, frame.program_counter());
+        assert_eq!(253, remaining);
+
+        let (thread, frame, mut state) = batch_test_frame(|_| vec![Instruction::Nop])?;
+        let mut remaining = INSTRUCTION_BATCH_SIZE;
+        assert!(matches!(
+            frame.execute_sync_batch(&thread, &mut state, &mut remaining, false),
+            Err(InvalidProgramCounter(1))
+        ));
+        assert_eq!(1, thread.instruction_count());
+        assert_eq!(1, frame.program_counter());
+        assert_eq!(255, remaining);
+        Ok(())
+    }
+
+    #[test]
+    fn test_stack_arguments_fill_reused_wide_locals() -> Result<()> {
+        let (_thread, frame, _) = batch_test_frame(|_| vec![Instruction::Return])?;
+        let mut definition = frame.class().class_file().clone();
+        let definition_method = definition.methods.first_mut().expect("test method");
+        definition_method.descriptor_index = definition.constant_pool.add_utf8("(JD)D")?;
+        for attribute in &mut definition_method.attributes {
+            if let Attribute::Code { max_locals, .. } = attribute {
+                *max_locals = 6;
+            }
+        }
+        let class = Class::from(None, definition)?;
+        let method = class.try_get_method("test", "(JD)D")?;
+        let mut caller = FrameState::default();
+        caller.stack.reset(3);
+        caller.stack.push_int(19)?;
+        caller.stack.push_long(42)?;
+        caller.stack.push_double(2.0)?;
+        let mut destination = FrameState::default();
+        destination.reset(&class, &method, vec![Value::Int(99); 6])?;
+        CallParameters::Stack(2).initialize(
+            &mut destination,
+            &class,
+            &method,
+            Some(&mut caller),
+        )?;
+        assert_eq!(19, caller.stack.pop_int()?);
+        assert!(caller.stack.is_empty());
+        assert_eq!(42, destination.locals.get_long(0)?);
+        assert_eq!(Value::Unused, destination.locals.get(1)?);
+        assert_eq!(Value::Double(2.0), destination.locals.get(2)?);
+        for index in [3, 4, 5] {
+            assert_eq!(Value::Unused, destination.locals.get(index)?);
+        }
+        assert!(destination.locals.get(6).is_err());
+        assert!(destination.stack.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_batch_preserves_locals_stack_and_branches() -> Result<()> {
+        let (thread, frame, mut state) = batch_test_frame(|_| {
+            vec![
+                Instruction::Iconst_0,
+                Instruction::Iload_0,
+                Instruction::Ifeq(7),
+                Instruction::Iinc(0, -1),
+                Instruction::Iconst_1,
+                Instruction::Iadd,
+                Instruction::Goto(1),
+                Instruction::Ireturn,
+            ]
+        })?;
+
+        // The loop must stop at a batch boundary before finishing the method.
+        let mut result = frame.execute_batch(&thread, &mut state).await?;
+        assert_eq!(ExecutionResult::Continue, result);
+        for _ in 0..100 {
+            result = frame.execute_batch(&thread, &mut state).await?;
+            if result != ExecutionResult::Continue {
+                break;
+            }
+        }
+        assert_eq!(ExecutionResult::Return(Some(Value::Int(1_000))), result);
+        assert_eq!(7, frame.program_counter());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_batch_stops_at_return() -> Result<()> {
+        let (thread, frame, mut state) =
+            batch_test_frame(|_| vec![Instruction::Iconst_1, Instruction::Ireturn])?;
+        assert_eq!(
+            ExecutionResult::Return(Some(Value::Int(1))),
+            frame.execute_batch(&thread, &mut state).await?
+        );
+        assert_eq!(1, frame.program_counter());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_batches_yield_with_sync_and_ready_async_handlers() -> Result<()> {
+        for ready_async in [false, true] {
+            let (thread, frame, mut state) = batch_test_frame(|class_index| {
+                if ready_async {
+                    // instanceof null uses an async handler that completes without awaiting.
+                    vec![
+                        Instruction::Aconst_null,
+                        Instruction::Instanceof(class_index),
+                        Instruction::Pop,
+                        Instruction::Goto(0),
+                    ]
+                } else {
+                    vec![Instruction::Goto(0)]
+                }
+            })?;
+
+            {
+                // Disable Tokio's implicit mutex budget to check the interpreter's own budget.
+                // Use a finite number of batches so a missing explicit yield fails, not hangs.
+                let mut execution = std::pin::pin!(tokio::task::unconstrained(async {
+                    for _ in 0..64 {
+                        assert_eq!(
+                            ExecutionResult::Continue,
+                            frame.execute_batch(&thread, &mut state).await?
+                        );
+                    }
+                    Ok::<(), crate::Error>(())
+                }));
+                let mut context = Context::from_waker(Waker::noop());
+                assert!(execution.as_mut().poll(&mut context).is_pending());
+            }
+
+            // Cancelling a yielded batch ends the mutable borrow, and the frame can resume.
+            assert_eq!(
+                ExecutionResult::Continue,
+                frame.execute_batch(&thread, &mut state).await?
+            );
+        }
+        Ok(())
+    }
+
+    async fn get_class(class_name: &str) -> Result<(Arc<VM>, Arc<Thread>, Arc<Class>)> {
+        let cargo_manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let classes_path = cargo_manifest.join("..").join("classes");
+        let class_path = ClassPath::from(&[classes_path]);
+        let configuration = ConfigurationBuilder::new()
+            .class_path(class_path.clone())
+            .build()?;
+        let vm = VM::new(configuration).await?;
+        let weak_vm = Arc::downgrade(&vm);
+        let thread = Thread::new(&weak_vm, 3);
+        let class = thread.class(class_name).await?;
+        Ok((vm, thread, class))
+    }
+
+    #[tokio::test]
+    async fn test_execute() -> Result<()> {
+        let (_vm, thread, class) = get_class("java.lang.Math").await?;
+        let method = class.method("addExact", "(II)I").expect("method not found");
+        let parameters = vec![Value::Int(1), Value::Int(2)];
+        let frame = Frame::new(&Arc::downgrade(&thread), &class, &method);
+        let result = frame.execute(parameters).await?;
+        assert!(matches!(result, Some(Value::Int(3))));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_reused_metadata_resets_pc_and_class_references() -> Result<()> {
+        let (vm, _thread, mut frame) = crate::test::frame().await?;
+        let original_class = frame.class().clone();
+        let original_method = frame.method().clone();
+        let methods = vm.method_ref_cache().for_class(&original_class);
+        let fields = vm.field_ref_cache().for_class(&original_class);
+        assert!(std::ptr::eq(frame.method_refs()?, methods.as_ref()));
+        assert!(std::ptr::eq(frame.field_refs()?, fields.as_ref()));
+        frame.program_counter.store(17, Ordering::Relaxed);
+        frame.reset(&original_class, &original_method);
+        assert_eq!(0, frame.program_counter());
+        assert!(std::ptr::eq(frame.method_refs()?, methods.as_ref()));
+        let mut definition = original_class.class_file().clone();
+        definition.this_class = definition.constant_pool.add_class("OtherFrameClass")?;
+        let other = Class::from(None, definition)?;
+        let method = other.try_get_method("test", "()V")?;
+        frame.reset(&other, &method);
+        assert!(!std::ptr::eq(frame.method_refs()?, methods.as_ref()));
+        assert!(!std::ptr::eq(frame.field_refs()?, fields.as_ref()));
+        assert!(Arc::ptr_eq(frame.method(), &method));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_method_call_equality() -> Result<()> {
+        let (_vm, _thread, frame) = crate::test::frame().await?;
+        let call = MethodCall {
+            intrinsic: IntrinsicBinding::Unresolved,
+            class: frame.class().clone(),
+            method: frame.method().clone(),
+            parameters: vec![Value::Int(42)].into(),
+            has_return_type: true,
+        };
+        let same_call = MethodCall {
+            intrinsic: IntrinsicBinding::Unresolved,
+            class: frame.class().clone(),
+            method: frame.method().clone(),
+            parameters: vec![Value::Int(42)].into(),
+            has_return_type: true,
+        };
+
+        assert_eq!(call, same_call);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_with_parameters_rejects_too_many_local_slots() -> Result<()> {
+        let (_vm, _thread, frame) = crate::test::frame().await?;
+        let result = FrameState::default().reset(frame.class(), frame.method(), [Value::Int(1)]);
+
+        assert!(matches!(result, Err(InternalError(message)) if message ==
+            "Method parameters require 1 local-variable slots, but Test.test()V declares 0"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_adjust_parameters() {
+        let parameters = vec![
+            Value::Int(1),
+            Value::Long(2),
+            Value::Float(3.0),
+            Value::Double(4.0),
+        ];
+        let mut locals = LocalVariables::with_max_size(0);
+        assert_eq!(6, locals.reset(parameters, 8));
+        assert_eq!(
+            (0..8)
+                .map(|index| locals.get(index).unwrap())
+                .collect::<Vec<_>>(),
+            vec![
+                Value::Int(1),
+                Value::Long(2),
+                Value::Unused,
+                Value::Float(3.0),
+                Value::Double(4.0),
+                Value::Unused,
+                Value::Unused,
+                Value::Unused,
+            ]
+        );
+    }
+}
+
+#[cfg(test)]
+mod resolution_tests;

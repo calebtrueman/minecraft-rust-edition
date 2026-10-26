@@ -1,0 +1,572 @@
+use crate::Error::{InvalidLocalVariable, InvalidLocalVariableIndex};
+use crate::Result;
+use ristretto_classloader::{Reference, Value};
+use ristretto_gc::Gc;
+use ristretto_gc::sync::RwLock;
+use std::fmt::Display;
+
+/// Keep allocation and value formatting out of the local-access fast path.
+#[cold]
+#[inline(never)]
+fn invalid_type(expected: &str, value: &Value) -> crate::Error {
+    InvalidLocalVariable {
+        expected: expected.to_owned(),
+        actual: value.to_string(),
+    }
+}
+
+/// Represents the local variables in a frame.
+#[derive(Clone, Debug)]
+pub struct LocalVariables {
+    locals: Vec<Value>,
+}
+
+impl LocalVariables {
+    /// Create a new local variables
+    pub fn new(locals: Vec<Value>) -> Self {
+        LocalVariables { locals }
+    }
+
+    /// Create a new local variables with a maximum size.
+    pub fn with_max_size(max_size: usize) -> Self {
+        Self::new(vec![Value::Unused; max_size])
+    }
+
+    /// Refill reusable local storage in JVM slot order, including wide-value placeholders.
+    #[inline]
+    pub(crate) fn reset(
+        &mut self,
+        parameters: impl IntoIterator<Item = Value>,
+        max_size: usize,
+    ) -> usize {
+        self.locals.clear();
+        // Reusing a large allocation in small recursive frames must not multiply retained
+        // capacity independently of their declared Java stack requirements.
+        if self.locals.capacity() > max_size.saturating_mul(4).max(16) {
+            self.locals.shrink_to(max_size);
+        }
+        self.locals.reserve(max_size);
+        for value in parameters {
+            let wide = matches!(value, Value::Long(_) | Value::Double(_));
+            self.locals.push(value);
+            if wide {
+                self.locals.push(Value::Unused);
+            }
+        }
+        let parameter_slots = self.locals.len();
+        if parameter_slots < max_size {
+            self.locals.resize(max_size, Value::Unused);
+        }
+        parameter_slots
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.locals.clear();
+    }
+
+    pub(crate) fn capacity(&self) -> usize {
+        self.locals.capacity()
+    }
+
+    /// Get a value from the local variables.
+    ///
+    /// # Errors
+    ///
+    /// if the local variable at the given index was not found.
+    #[inline]
+    pub fn get(&self, index: usize) -> Result<Value> {
+        match self.locals.get(index) {
+            Some(value) => Ok(value.clone()),
+            None => Err(InvalidLocalVariableIndex(index)),
+        }
+    }
+
+    /// Get an int from the local variables.
+    ///
+    /// # Errors
+    ///
+    /// if the local variable at the given index was not found or if the value is not an int.
+    #[inline]
+    pub fn get_int(&self, index: usize) -> Result<i32> {
+        match self.locals.get(index) {
+            Some(Value::Int(value)) => Ok(*value),
+            Some(value) => Err(invalid_type("int", value)),
+            None => Err(InvalidLocalVariableIndex(index)),
+        }
+    }
+
+    /// Get a long from the local variables.
+    ///
+    /// # Errors
+    ///
+    /// if the local variable at the given index was not found or if the value is not a long.
+    #[inline]
+    pub fn get_long(&self, index: usize) -> Result<i64> {
+        match self.locals.get(index) {
+            Some(Value::Long(value)) => Ok(*value),
+            Some(value) => Err(invalid_type("long", value)),
+            None => Err(InvalidLocalVariableIndex(index)),
+        }
+    }
+
+    /// Get a float from the local variables.
+    ///
+    /// # Errors
+    ///
+    /// if the local variable at the given index was not found or if the value is not a float.
+    #[inline]
+    pub fn get_float(&self, index: usize) -> Result<f32> {
+        match self.locals.get(index) {
+            Some(Value::Float(value)) => Ok(*value),
+            Some(value) => Err(invalid_type("float", value)),
+            None => Err(InvalidLocalVariableIndex(index)),
+        }
+    }
+
+    /// Get a double from the local variables.
+    ///
+    /// # Errors
+    ///
+    /// if the local variable at the given index was not found or if the value is not a double.
+    #[inline]
+    pub fn get_double(&self, index: usize) -> Result<f64> {
+        match self.locals.get(index) {
+            Some(Value::Double(value)) => Ok(*value),
+            Some(value) => Err(invalid_type("double", value)),
+            None => Err(InvalidLocalVariableIndex(index)),
+        }
+    }
+
+    /// Get a null or object from the local variables.
+    ///
+    /// # Errors
+    ///
+    /// if the local variable at the given index was not found or if the value is not a null or
+    /// object.
+    #[inline]
+    pub fn get_object(&self, index: usize) -> Result<Option<Gc<RwLock<Reference>>>> {
+        match self.locals.get(index) {
+            Some(Value::Object(reference)) => Ok(reference.clone()),
+            Some(value) => Err(invalid_type("object", value)),
+            None => Err(InvalidLocalVariableIndex(index)),
+        }
+    }
+
+    /// Set a value in the local variables.
+    ///
+    /// # Errors
+    ///
+    /// if the index is out of bounds.
+    #[inline]
+    pub fn set(&mut self, index: usize, value: Value) -> Result<()> {
+        if index >= self.locals.capacity() {
+            return Err(InvalidLocalVariableIndex(index));
+        }
+        if let Some(local) = self.locals.get_mut(index) {
+            *local = value;
+        }
+        Ok(())
+    }
+
+    /// Set an int in the local variables.
+    ///
+    /// # Errors
+    ///
+    /// if the index is out of bounds or if the value is not an int.
+    #[inline]
+    pub fn set_int(&mut self, index: usize, value: i32) -> Result<()> {
+        self.set(index, Value::Int(value))
+    }
+
+    /// Set a long in the local variables.
+    ///
+    /// # Errors
+    ///
+    /// if the index is out of bounds or if the value is not a long.
+    #[inline]
+    pub fn set_long(&mut self, index: usize, value: i64) -> Result<()> {
+        self.set(index, Value::Long(value))
+    }
+
+    /// Set a float in the local variables.
+    ///
+    /// # Errors
+    ///
+    /// if the index is out of bounds or if the value is not a float.
+    #[inline]
+    pub fn set_float(&mut self, index: usize, value: f32) -> Result<()> {
+        self.set(index, Value::Float(value))
+    }
+
+    /// Set a double in the local variables.
+    ///
+    /// # Errors
+    ///
+    /// if the index is out of bounds or if the value is not a double.
+    #[inline]
+    pub fn set_double(&mut self, index: usize, value: f64) -> Result<()> {
+        self.set(index, Value::Double(value))
+    }
+
+    /// Set a null or object in the local variables.
+    ///
+    /// # Errors
+    ///
+    /// if the index is out of bounds or if the value is not a null or object.
+    #[inline]
+    pub fn set_object(&mut self, index: usize, value: Option<Gc<RwLock<Reference>>>) -> Result<()> {
+        self.set(index, Value::Object(value))
+    }
+
+    /// Get the length of the local variables.
+    pub fn len(&self) -> usize {
+        self.locals
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|&(_, value)| *value != Value::Unused)
+            .map_or(0, |(index, _)| index + 1)
+    }
+
+    /// Check if the local variables are empty.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+impl Display for LocalVariables {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut locals = Vec::new();
+        for local in &self.locals {
+            let value = local.to_string();
+            let chars: Vec<char> = value.chars().collect();
+            if chars.len() > 100 {
+                let value = chars.iter().take(97).collect::<String>();
+                locals.push(format!("{value}..."));
+            } else {
+                locals.push(value);
+            }
+        }
+        write!(f, "[{}]", locals.join(", "))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ristretto_classloader::Reference;
+
+    #[test]
+    fn test_get() -> Result<()> {
+        let mut locals = LocalVariables::with_max_size(1);
+        locals.set(0, Value::Int(42))?;
+        let value = locals.get(0)?.as_i32()?;
+        assert_eq!(value, 42);
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_invalid_index() {
+        let locals = LocalVariables::with_max_size(0);
+        assert!(matches!(locals.get(0), Err(InvalidLocalVariableIndex(0))));
+    }
+
+    #[test]
+    fn test_get_int() -> Result<()> {
+        let mut locals = LocalVariables::with_max_size(1);
+        locals.set(0, Value::Int(42))?;
+        assert_eq!(locals.get_int(0)?, 42);
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_int_invalid_index() {
+        let locals = LocalVariables::with_max_size(0);
+        assert!(matches!(
+            locals.get_int(0),
+            Err(InvalidLocalVariableIndex(0))
+        ));
+    }
+
+    #[test]
+    fn test_get_int_invalid_type() {
+        let locals = LocalVariables::with_max_size(1);
+        assert!(matches!(
+            locals.get_int(0),
+            Err(InvalidLocalVariable {
+                expected,
+                actual
+            }) if expected == "int" && actual == "unused"
+        ));
+    }
+
+    #[test]
+    fn test_get_long() -> Result<()> {
+        let mut locals = LocalVariables::with_max_size(1);
+        locals.set(0, Value::Long(42))?;
+        assert_eq!(locals.get_long(0)?, 42);
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_long_invalid_index() {
+        let locals = LocalVariables::with_max_size(0);
+        assert!(matches!(
+            locals.get_long(0),
+            Err(InvalidLocalVariableIndex(0))
+        ));
+    }
+
+    #[test]
+    fn test_get_long_invalid_type() {
+        let locals = LocalVariables::with_max_size(1);
+        assert!(matches!(
+            locals.get_long(0),
+            Err(InvalidLocalVariable {
+                expected,
+                actual
+            }) if expected == "long" && actual == "unused"
+        ));
+    }
+
+    #[test]
+    fn test_get_float() -> Result<()> {
+        let mut locals = LocalVariables::with_max_size(1);
+        locals.set(0, Value::Float(42.1))?;
+        let value = locals.get_float(0)? - 42.1f32;
+        assert!(value.abs() < 0.1f32);
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_float_invalid_index() {
+        let locals = LocalVariables::with_max_size(0);
+        assert!(matches!(
+            locals.get_float(0),
+            Err(InvalidLocalVariableIndex(0))
+        ));
+    }
+
+    #[test]
+    fn test_get_float_invalid_type() {
+        let locals = LocalVariables::with_max_size(1);
+        assert!(matches!(
+            locals.get_float(0),
+            Err(InvalidLocalVariable {
+                expected,
+                actual
+            }) if expected == "float" && actual == "unused"
+        ));
+    }
+
+    #[test]
+    fn test_get_double() -> Result<()> {
+        let mut locals = LocalVariables::with_max_size(1);
+        locals.set(0, Value::Double(42.1))?;
+        let value = locals.get_double(0)? - 42.1f64;
+        assert!(value.abs() < 0.1f64);
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_double_invalid_index() {
+        let locals = LocalVariables::with_max_size(0);
+        assert!(matches!(
+            locals.get_double(0),
+            Err(InvalidLocalVariableIndex(0))
+        ));
+    }
+
+    #[test]
+    fn test_get_double_invalid_type() {
+        let locals = LocalVariables::with_max_size(1);
+        assert!(matches!(
+            locals.get_double(0),
+            Err(InvalidLocalVariable {
+                expected,
+                actual
+            }) if expected == "double" && actual == "unused"
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_get_object() -> Result<()> {
+        let (_vm, thread) = crate::test::thread().await?;
+        let mut locals = LocalVariables::with_max_size(2);
+        let reference = Reference::from(vec![42i8]);
+        let object = Value::new_object(thread.vm()?.garbage_collector(), reference);
+        locals.set_object(0, None)?;
+        locals.set(1, object.clone())?;
+        assert!(locals.get_object(0)?.is_none());
+        assert_eq!(locals.get(1)?, object);
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_object_invalid_index() {
+        let locals = LocalVariables::with_max_size(0);
+        assert!(matches!(
+            locals.get_object(0),
+            Err(InvalidLocalVariableIndex(0))
+        ));
+    }
+
+    #[test]
+    fn test_get_object_invalid_type() {
+        let locals = LocalVariables::with_max_size(1);
+        assert!(matches!(
+            locals.get_object(0),
+            Err(InvalidLocalVariable {
+                expected,
+                actual
+            }) if expected == "object" && actual == "unused"
+        ));
+    }
+
+    #[test]
+    fn test_set() -> Result<()> {
+        let mut locals = LocalVariables::with_max_size(1);
+        locals.set(0, Value::Int(42))?;
+        assert_eq!(locals.get_int(0)?, 42);
+        Ok(())
+    }
+
+    #[test]
+    fn test_set_invalid_index() {
+        let mut locals = LocalVariables::with_max_size(0);
+        assert!(matches!(
+            locals.set(0, Value::Object(None)),
+            Err(InvalidLocalVariableIndex(0))
+        ));
+    }
+
+    #[test]
+    fn test_set_int() -> Result<()> {
+        let mut locals = LocalVariables::with_max_size(1);
+        locals.set_int(0, 42)?;
+        assert_eq!(locals.get_int(0)?, 42);
+        Ok(())
+    }
+
+    #[test]
+    fn test_set_int_invalid_index() {
+        let mut locals = LocalVariables::with_max_size(0);
+        assert!(matches!(
+            locals.set_int(0, 42),
+            Err(InvalidLocalVariableIndex(0))
+        ));
+    }
+
+    #[test]
+    fn test_set_long() -> Result<()> {
+        let mut locals = LocalVariables::with_max_size(1);
+        locals.set_long(0, 42)?;
+        assert_eq!(locals.get_long(0)?, 42);
+        Ok(())
+    }
+
+    #[test]
+    fn test_set_long_invalid_index() {
+        let mut locals = LocalVariables::with_max_size(0);
+        assert!(matches!(
+            locals.set_long(0, 42),
+            Err(InvalidLocalVariableIndex(0))
+        ));
+    }
+
+    #[test]
+    fn test_set_float() -> Result<()> {
+        let mut locals = LocalVariables::with_max_size(1);
+        locals.set_float(0, 42.1)?;
+        let value = locals.get_float(0)? - 42.1f32;
+        assert!(value.abs() < 0.1f32);
+        Ok(())
+    }
+
+    #[test]
+    fn test_set_float_invalid_index() {
+        let mut locals = LocalVariables::with_max_size(0);
+        assert!(matches!(
+            locals.set_float(0, 42.1),
+            Err(InvalidLocalVariableIndex(0))
+        ));
+    }
+
+    #[test]
+    fn test_set_double() -> Result<()> {
+        let mut locals = LocalVariables::with_max_size(1);
+        locals.set_double(0, 42.1)?;
+        let value = locals.get_double(0)? - 42.1f64;
+        assert!(value.abs() < 0.1f64);
+        Ok(())
+    }
+
+    #[test]
+    fn test_set_double_invalid_index() {
+        let mut locals = LocalVariables::with_max_size(0);
+        assert!(matches!(
+            locals.set_double(0, 42.1),
+            Err(InvalidLocalVariableIndex(0))
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_set_object() -> Result<()> {
+        let (_vm, thread) = crate::test::thread().await?;
+        let mut locals = LocalVariables::with_max_size(2);
+        let reference = Reference::from(vec![42i8]);
+        let object_value = Value::new_object(thread.vm()?.garbage_collector(), reference.clone());
+        let Value::Object(wrapped_object) = object_value else {
+            panic!("expected object")
+        };
+
+        locals.set_object(0, None)?;
+        locals.set_object(1, wrapped_object)?;
+        assert!(locals.get_object(0)?.is_none());
+        let retrieved = locals.get_object(1)?;
+        assert!(retrieved.is_some());
+        assert_eq!(*retrieved.expect("retrieved object").read(), reference);
+        Ok(())
+    }
+
+    #[test]
+    fn test_set_object_invalid_index() {
+        let mut locals = LocalVariables::with_max_size(0);
+        assert!(matches!(
+            locals.set_object(0, None),
+            Err(InvalidLocalVariableIndex(0))
+        ));
+    }
+
+    #[test]
+    fn test_len() -> Result<()> {
+        let mut local_variables = LocalVariables::with_max_size(3);
+        assert_eq!(local_variables.len(), 0);
+        local_variables.set(1, Value::Int(42))?;
+        assert_eq!(local_variables.len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn test_is_empty() -> Result<()> {
+        let mut local_variables = LocalVariables::with_max_size(3);
+        assert!(local_variables.is_empty());
+        local_variables.set(1, Value::Int(42))?;
+        assert!(!local_variables.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn test_display() -> Result<()> {
+        let mut local_variables = LocalVariables::with_max_size(6);
+        local_variables.set(0, Value::Int(1))?;
+        local_variables.set(1, Value::Long(42))?;
+        local_variables.set(2, Value::Float(2.3))?;
+        local_variables.set(4, Value::Double(42.1))?;
+        assert_eq!(
+            "[int(1), long(42), float(2.3), unused, double(42.1), unused]",
+            local_variables.to_string()
+        );
+        Ok(())
+    }
+}

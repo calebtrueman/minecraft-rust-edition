@@ -1,0 +1,18 @@
+[package]
+name = "rust-edition-java"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+rust-version = "1.97.1"
+description = "A small Java 25 runtime bridge for Minecraft: Rust Edition"
+
+[dependencies]
+ristretto_vm = { path = "../../third_party/ristretto_vm", default-features = false }
+
+[dev-dependencies]
+tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread"] }
+
+[workspace]
+
+[lints.rust]
+unsafe_code = "forbid"

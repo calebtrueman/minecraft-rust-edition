@@ -1,0 +1,109 @@
+//! # Ristretto VM
+//!
+//! [![Code Coverage](https://codecov.io/gh/theseus-rs/ristretto/branch/main/graph/badge.svg)](https://codecov.io/gh/theseus-rs/ristretto)
+//! [![Benchmarks](https://img.shields.io/badge/%F0%9F%90%B0_bencher-enabled-6ec241)](https://bencher.dev/perf/theseus-rs-ristretto)
+//! [![License](https://img.shields.io/crates/l/ristretto_vm)](https://github.com/theseus-rs/ristretto#license)
+//! [![Semantic Versioning](https://img.shields.io/badge/%E2%9A%99%EF%B8%8F_SemVer-2.0.0-blue)](https://semver.org/spec/v2.0.0.html)
+//!
+//! Ristretto VM is a Java Virtual Machine implementation written in pure Rust. It executes Java
+//! bytecode by interpreting class files loaded through the Ristretto classloader.
+//!
+//! ## Features
+//!
+//! - Bytecode interpretation with no dependencies on existing JVM implementations
+//! - Pure Rust implementation for memory safety and performance
+//! - Support for Java class loading and execution
+//! - File-oriented and memory-only Java source compilation
+//! - Configurable VM parameters
+//! - Basic JIT compilation capabilities
+//! - Type safe concurrent, mark-sweep garbage collector
+//!
+//! ## Runtime requirements
+//!
+//! The JIT subsystem requires a multi-thread `tokio` runtime (e.g.
+//! `#[tokio::main(flavor = "multi_thread")]` or
+//! `tokio::runtime::Builder::new_multi_thread()`). This is because JIT-emitted helper
+//! functions are invoked from native code and must bridge back into async class loading via
+//! `tokio::task::block_in_place`, which is only valid on a multi-thread runtime. If the VM is
+//! constructed under a current-thread runtime, the JIT is automatically disabled and a warning
+//! is emitted; the VM falls back to the interpreter.
+//!
+//! ## Examples
+//!
+//! ```rust,no_run
+//! use ristretto_vm::{VM, Configuration, ConfigurationBuilder};
+//! use ristretto_classloader::ClassPath;
+//!
+//! # #[tokio::main]
+//! # async fn main() -> ristretto_vm::Result<()> {
+//! // Create a VM configuration
+//! let configuration = ConfigurationBuilder::new()
+//!     .class_path(ClassPath::from(&["/path/to/classes"]))
+//!     .build()?;
+//!
+//! // Create the VM instance
+//! let mut vm = VM::new(configuration).await?;
+//!
+//! // Execute main method of a class
+//! let _ = vm.invoke_main(&[] as &[&str]).await?;
+//! # Ok(())
+//! # }
+//! ```
+
+#![deny(unsafe_code)]
+// Resolving Send for the nested invokedynamic futures requires additional trait solver depth.
+#![recursion_limit = "256"]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::panic_in_result_fn,
+        reason = "unit tests use assertions in Result-returning async tests"
+    )
+)]
+
+mod assignable;
+mod call_site_cache;
+mod compiler;
+mod configuration;
+mod field_ref_cache;
+mod frame;
+mod instruction;
+mod intrinsic_methods;
+
+pub use intrinsic_methods::{
+    AsyncIntrinsicMethod, IntrinsicMethod, MethodRegistry, SyncIntrinsicMethod,
+};
+mod java_object;
+mod jit;
+mod jit_runtime_helpers;
+mod local_variables;
+mod method_ref_cache;
+mod module_system;
+pub mod monitor;
+mod operand_stack;
+mod reference_cache;
+mod rust_value;
+pub mod startup_trace;
+mod string_pool;
+#[cfg(test)]
+pub(crate) mod test;
+mod thread;
+mod vm;
+
+pub use compiler::{CompiledClasses, Compiler, CompilerError, JavaSource};
+pub use configuration::{
+    Configuration, ConfigurationBuilder, MainModule, ModuleExport, ModuleOpens, ModulePatch,
+    ModuleRead, VerifyMode,
+};
+pub(crate) use frame::Frame;
+pub use java_object::JavaObject;
+pub(crate) use local_variables::LocalVariables;
+pub use module_system::{ALL_UNNAMED, AccessCheckResult, DefinedModule, ModuleSystem};
+pub(crate) use operand_stack::OperandStack;
+pub use ristretto_classloader::{
+    Class, ClassLoader, ClassPath, ClassPathEntry, DEFAULT_JAVA_VERSION, Memory, Object, Reference,
+    Value,
+};
+pub use ristretto_types::{Error, JavaError, Parameters, Result, RustValue};
+pub use thread::Thread;
+pub use vm::VM;
