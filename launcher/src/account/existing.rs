@@ -322,6 +322,7 @@ fn running_official_game_token(expected_uuid: &str) -> Option<String> {
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn java_pid_and_command(line: &str) -> Option<(&str, &str)> {
     let line = line.trim_start();
     let end = line.find(char::is_whitespace)?;
@@ -332,6 +333,7 @@ fn java_pid_and_command(line: &str) -> Option<(&str, &str)> {
     Some((pid, line[end..].trim()))
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn token_from_game_args(args: &str, expected_uuid: &str) -> Option<String> {
     let args: Vec<_> = args.split_whitespace().collect();
     if !args.contains(&"net.minecraft.client.main.Main") {
