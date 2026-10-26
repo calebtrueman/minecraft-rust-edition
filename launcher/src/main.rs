@@ -865,6 +865,48 @@ impl Launcher {
         });
     }
 
+    fn choose_local_build(&mut self, cx: &mut Context<Self>) {
+        if self.installing.is_some() {
+            return;
+        }
+        let paths = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Install build".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            if let Ok(Ok(Some(mut paths))) = paths.await {
+                if let Some(path) = paths.pop() {
+                    let _ = this.update(cx, |this, cx| {
+                        if this.installing.is_some() {
+                            return;
+                        }
+                        let mut number = 1u64;
+                        let tag = loop {
+                            let tag = format!("local-build-{number}");
+                            if std::fs::symlink_metadata(backend::version_dir(&tag)).is_err() {
+                                break tag;
+                            }
+                            number += 1;
+                        };
+                        this.installing = Some((tag.clone(), 0.0));
+                        this.install_started = Some(Instant::now());
+                        this.install_error = None;
+                        this.bar = (0., 0.);
+                        let tx = this.tx.clone();
+                        std::thread::spawn(move || {
+                            let result = backend::install_local(&path, &tag).map(|_| ());
+                            let _ = tx.send(Msg::Installed(tag, result));
+                        });
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
     fn choose_folder(&mut self, cx: &mut Context<Self>) {
         let paths = cx.prompt_for_paths(PathPromptOptions {
             files: false,
@@ -3049,14 +3091,123 @@ impl Launcher {
         }
     }
 
+    fn local_builds_panel(&self, cx: &mut Context<Self>) -> Div {
+        let t = self.theme;
+        let mut choose = button(
+            "choose-local-build",
+            "Choose build folder",
+            Kind::Secondary,
+            &t,
+        );
+        if self.installing.is_some() {
+            choose = disabled(choose);
+        } else {
+            choose = choose.on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                this.choose_local_build(cx);
+            }));
+        }
+        let mut panel = plate(&t)
+            .p(px(16.))
+            .flex()
+            .flex_col()
+            .gap(px(12.))
+            .child(text(theme::UI).text_color(t.ink).child("Local builds"))
+            .child(
+                text(theme::CAPTION)
+                    .text_color(t.muted)
+                    .child("Choose the folder you unpacked from a Rust Edition test build."),
+            )
+            .child(choose);
+        if self
+            .installing
+            .as_ref()
+            .is_some_and(|(tag, _)| tag.starts_with("local-"))
+        {
+            panel = panel.child(
+                text(theme::CAPTION)
+                    .text_color(t.muted)
+                    .child("Installing local build…"),
+            );
+        }
+        if let Some((_, error)) = self
+            .install_error
+            .as_ref()
+            .filter(|(tag, _)| tag.starts_with("local-"))
+        {
+            panel = panel.child(
+                text(theme::CAPTION)
+                    .text_color(t.danger)
+                    .child(error.clone()),
+            );
+        }
+        for tag in self
+            .installed
+            .iter()
+            .filter(|tag| tag.starts_with("local-"))
+        {
+            let selected = self.selected() == Some(tag);
+            let confirming = self.confirm_remove.as_ref() == Some(tag);
+            let (select_tag, remove_tag) = (tag.clone(), tag.clone());
+            let mut actions = div().flex().items_center().gap(px(8.));
+            if selected {
+                actions = actions.child(text(theme::CAPTION).text_color(t.accent).child("In use"));
+            } else {
+                actions = actions.child(
+                    button(format!("use-local-{tag}"), "Use", Kind::Ghost, &t).on_click(
+                        cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            this.settings.selected = Some(select_tag.clone());
+                            this.settings.save();
+                            cx.notify();
+                        }),
+                    ),
+                );
+            }
+            actions = actions.child(
+                button(
+                    format!("remove-local-{tag}"),
+                    if confirming {
+                        "Remove for good"
+                    } else {
+                        "Remove"
+                    },
+                    Kind::Ghost,
+                    &t,
+                )
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    if this.confirm_remove.as_ref() == Some(&remove_tag) {
+                        this.remove(&remove_tag);
+                    } else {
+                        this.confirm_remove = Some(remove_tag.clone());
+                    }
+                    cx.notify();
+                })),
+            );
+            panel = panel.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(16.))
+                    .child(text(theme::UI).text_color(t.ink).child(tag.clone()))
+                    .child(actions),
+            );
+        }
+        panel
+    }
+
     fn versions_page(&mut self, cx: &mut Context<Self>) -> Div {
         let t = self.theme;
         let header = page_header(
             "Versions",
-            "Builds from GitHub. Each one installs into its own folder.",
+            "Install a release or choose an unpacked test build.",
             &t,
         );
-        let page = div().flex().flex_col().gap(px(32.)).child(header);
+        let page = div()
+            .flex()
+            .flex_col()
+            .gap(px(32.))
+            .child(header)
+            .child(self.local_builds_panel(cx));
         let releases = match &self.releases {
             Load::Loading => return page.child(centered("Loading releases…", &t)),
             Load::Failed(e) => {

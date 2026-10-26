@@ -4,9 +4,10 @@
 # older launchers find the binary inside it) and horizon-launcher-macos-arm64.dmg (the installer:
 # the app and an Applications link over a background, to drag one onto the other).
 #
-#   packaging/macos/package.sh BINARY VERSION OUTDIR
+#   packaging/macos/package.sh BINARY VERSION OUTDIR [--app-only]
 #
-# Needs macOS (ditto, codesign, hdiutil) and dmgbuild (pip install dmgbuild==1.6.5; $DMGBUILD
+# --app-only creates just the app and skips disk-image tools.
+# Full packaging needs macOS (ditto, codesign, hdiutil) and dmgbuild (pip install dmgbuild==1.6.5; $DMGBUILD
 # names it if it isn't on PATH). Signing: ad hoc by default, which needs no Apple account. With
 # MACOS_SIGN_IDENTITY set to a "Developer ID Application: …" identity (in $MACOS_SIGN_KEYCHAIN
 # when set), the app and the .dmg are signed with the hardened runtime and a timestamp, and with
@@ -16,6 +17,11 @@ set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 binary=$1
 version=$2
+mode=${4:-full}
+if [[ "$mode" != full && "$mode" != --app-only ]]; then
+  echo "Unknown package option: $mode" >&2
+  exit 2
+fi
 out=$(mkdir -p "$3" && cd "$3" && pwd)
 app="$out/Minecraft Rust Edition.app"
 
@@ -42,6 +48,10 @@ codesign --verify --strict --verbose=2 "$app"
 notarize=$([[ "$identity" != "-" && -n "${MACOS_NOTARY_PROFILE:-}" ]] && echo yes || true)
 # The app first, so the zip and the .dmg both carry it stapled.
 [[ -z "$notarize" ]] || "$here/notarize.sh" "$app"
+if [[ "$mode" == --app-only ]]; then
+  echo "Packaged $app"
+  exit 0
+fi
 
 rm -f "$out/horizon-launcher-macos-arm64.zip" "$out/horizon-launcher-macos-arm64.dmg"
 # No resource forks or extended attributes: they would land as ._ files inside the bundle.

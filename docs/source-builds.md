@@ -6,7 +6,14 @@ that the game matches Java Edition on every server.
 
 ## From a build artifact
 
-Unpack the archive into a new folder. From a terminal in that folder, run:
+Unpack the archive into a new folder. On macOS, open **Minecraft Rust Edition.app**.
+On Windows, open **horizon-launcher.exe**. On Linux, run `./horizon-launcher`.
+
+In the launcher, open **Versions → Choose build folder** and choose the unpacked
+folder. After installation, open **Play** and prepare the game files from your
+Minecraft installation.
+
+If you prefer the terminal, run these commands from the unpacked folder:
 
 ```sh
 ./horizon-launcher install-local . --tag local-test

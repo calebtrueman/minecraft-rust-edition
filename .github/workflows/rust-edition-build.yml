@@ -111,6 +111,11 @@ jobs:
           cargo run --locked -p xtask -- package-source "target/fast/horizon-client${{ matrix.exe }}" "dist/minecraft-rust-edition-${{ matrix.name }}"
           cp "target/release/horizon-launcher${{ matrix.exe }}" "dist/minecraft-rust-edition-${{ matrix.name }}/"
           cp docs/source-builds.md "dist/minecraft-rust-edition-${{ matrix.name }}/START-HERE.md"
+      - name: Include a macOS app in the test package
+        if: runner.os == 'macOS'
+        run: |
+          version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' launcher/Cargo.toml | head -1)
+          packaging/macos/package.sh target/release/horizon-launcher "$version" "dist/minecraft-rust-edition-${{ matrix.name }}" --app-only
       - name: Check the packaged programs and local install
         run: |
           bundle="$PWD/dist/minecraft-rust-edition-${{ matrix.name }}"
