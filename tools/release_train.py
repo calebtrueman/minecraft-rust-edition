@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Decides when Horizon releases, names the release and writes its notes (.github/workflows/release.yml).
+"""Decides when Minecraft: Rust Edition releases, names the release and writes its notes (.github/workflows/release.yml).
 
     python3 tools/release_train.py decide --kind game [--head SHA] [--force]
     python3 tools/release_train.py decide --kind launcher
@@ -39,7 +39,7 @@ import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
-REPO = os.environ.get("GITHUB_REPOSITORY", "ludovic111/horizon")
+REPO = os.environ.get("GITHUB_REPOSITORY", "calebtrueman/minecraft-rust-edition")
 # Releases ship in batches, so players get a few releases a day rather than one per merge: BATCH player-facing pull
 # requests, settled for DEBOUNCE, or whatever is waiting once the oldest has waited MAX_WAIT.
 BATCH = 5
@@ -78,13 +78,12 @@ LAUNCHER_IGNORED = ["launcher/links.json", "launcher/docs/", "launcher/tests/"]
 # its notes open with the way to the launcher (#1647). Raw HTML on one line, which GitHub shows and every launcher's
 # notes view and one-line summary skip (pulldown-cmark's HTML events), so launchers never tell players to get
 # themselves. The site's Releases page leaves it out too.
-PLAYERS = ('<h3>Want to play? Download the <a href="https://playhorizon.dev">Horizon launcher</a>, not the files '
-           'below</h3><p>It installs this version and keeps it up to date. It is also on GitHub: <a href="'
-           f'https://github.com/{REPO}/releases?q=launcher&amp;expanded=true">the launcher releases</a>. You need your '
-           "own copy of Minecraft: Java Edition. The files below are what the launcher installs, and the dedicated "
-           "server for people who host one.</p>")
-LAUNCHER_FOOTER = ("Your launcher updates itself. New here? Download the archive for your system below, extract it, "
-                   "and run `horizon-launcher`. Website: https://playhorizon.dev")
+PLAYERS = ('<h3>Minecraft: Rust Edition</h3><p>Get the launcher from <a href="'
+           f'https://github.com/{REPO}/releases?q=launcher&amp;expanded=true">the launcher releases</a>. '
+           'You need your own copy of Minecraft: Java Edition. The files below contain the game and '
+           'dedicated server.</p>')
+LAUNCHER_FOOTER = ("Download the archive for your system below, extract it, "
+                   "and run `horizon-launcher`.")
 DISCLAIMER = "Not an official Minecraft product. Not approved by or associated with Mojang or Microsoft."
 # An open issue with this label holds every game release (docs/release-flow.md). Only people who can triage the
 # repository can add it, and the issue's text is never read: its author could edit it afterwards.
@@ -357,12 +356,12 @@ def line_intro(kind, version, previous):
         return None
     line = f"{found[0]}.{found[1]}"
     if previous and semver(previous, GAME_PREFIX if kind == "game" else LAUNCHER_PREFIX):
-        return f"The first release of Horizon {line}."
+        return f"The first release of Minecraft: Rust Edition {line}."
     if kind == "launcher":
         return (f"The launcher is numbered with the game from now on: this is launcher {line}.0, the release after "
                 f"launcher {(previous or '').removeprefix(OLD_LAUNCHER_PREFIX) or '0.16'}. Your launcher takes it by itself.")
     before = (previous or "").removeprefix(GAME_PREFIX)
-    return (f"Horizon is numbered from now on: this is Horizon {line}.0" + (f", the release after {before}" if before else "")
+    return (f"Minecraft: Rust Edition is numbered from now on: this is Minecraft: Rust Edition {line}.0" + (f", the release after {before}" if before else "")
             + ". Releases used to be named after the day they came out; from now on they count up from "
             f"{line}.0, and the launcher's too. The launcher installs it by itself once it has updated itself. A server "
             "installed with install.sh that still says it is up to date takes it with "
@@ -375,9 +374,9 @@ def notes(kind, version, prs, issues, previous=None):
     new = [pr for pr in shown if "feature" in pr["labels"]]
     fixed = [pr for pr in shown if "feature" not in pr["labels"]]
     if kind == "game":
-        title = f"Horizon {version.removeprefix(GAME_PREFIX)}" + (f": {summary(new, fixed)}" if shown else "")
+        title = f"Minecraft: Rust Edition {version.removeprefix(GAME_PREFIX)}" + (f": {summary(new, fixed)}" if shown else "")
     else:
-        title = f"Horizon launcher {version.removeprefix(OLD_LAUNCHER_PREFIX).removeprefix(LAUNCHER_PREFIX)}"
+        title = f"Minecraft: Rust Edition launcher {version.removeprefix(OLD_LAUNCHER_PREFIX).removeprefix(LAUNCHER_PREFIX)}"
     intro = line_intro(kind, version, previous)
     parts = [PLAYERS] if kind == "game" else []
     if intro:
