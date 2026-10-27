@@ -37,7 +37,7 @@ The opening, then Play ([clip](docs/opening.webm)):
   preparer sources, else that version's own `horizon-prepare`; versions released before it
   still prepare with their Python script and need Python 3.10+. Before importing,
   preparation reuses checksum-verified game jars and libraries from the current
-  or another installed Horizon version, so the original Minecraft install is
+  or another installed game version, so the original Minecraft install is
   only required when no valid imported copy exists.
 - **Mods**: search Modrinth for resource
   packs and modpacks, each marked Works, Partly or Doesn't run in
@@ -83,16 +83,18 @@ The opening, then Play ([clip](docs/opening.webm)):
   Stop sharing and offers **Limit them to Minecraft**: when your tailnet has Tailscale's default
   access controls, one click changes them so friends you share with reach only the server's
   port (Remove the limit undoes it); custom access controls are never rewritten, the page gives
-  the rule to add instead. Horizon never turns on Funnel.
-- **Patch notes**: each release's notes, newest first, with a link to GitHub Sponsors. Quiet "Discord" and "Website" links sit in the footer.
+  the rule to add instead. The launcher never turns on Funnel.
+- **Patch notes**: each release's notes, newest first. A sponsor panel appears only when
+  `launcher/links.json` sets a sponsor URL. The footer shows only configured Discord and Website
+  links. By default, Discord and sponsor are empty; Website points to this project's GitHub page.
 
-Data lives in the platform's data directory (`~/.local/share/horizon-launcher` on Linux,
-`~/Library/Application Support/horizon-launcher` on macOS, `%APPDATA%\horizon-launcher` on
-Windows): `versions/<tag>/`, `server-jars/`, `server/`, `settings.json`, and for the Servers
-page `servers.json` (the list), `servers/<name>/` (the servers created there) and
-`server-runtime/` (the programs and game files they run).
+Data lives in the platform's data directory (`~/.local/share/minecraft-rust-edition-launcher` on
+Linux, `~/Library/Application Support/minecraft-rust-edition-launcher` on macOS, or
+`%APPDATA%\minecraft-rust-edition-launcher` on Windows). It holds `versions/<tag>/`,
+`server-jars/`, `server/`, `settings.json`, and for the Servers page `servers.json` (the list),
+`servers/<name>/` (the servers created there) and `server-runtime/` (the programs and game files).
 
-- **Settings**: install new Horizon versions automatically (on unless you turn it off; the
+- **Settings**: install new game versions automatically (on unless you turn it off; the
   selected version only moves to the new one if you were on the newest), the opening animation,
   the game's extra command-line arguments, an HTTP proxy for downloads, and the launcher's own
   version and update state.
@@ -108,16 +110,17 @@ page `servers.json` (the list), `servers/<name>/` (the servers created there) an
   one for a single run.
 - **Proxy**: when the internet here needs one (a school's, an office's, a country where a host is
   unreachable), Settings' Proxy takes the `http://host:port` address your proxy app listens on, and
-  every download goes through it: Horizon's releases and the launcher's own update, Minecraft's
-  files and Java from Mojang, Modrinth, CurseForge, Horizon's mod registry, pictures, Microsoft
+  every download goes through it: the game's releases and the launcher's own update, Minecraft's
+  files and Java from Mojang, Modrinth, CurseForge, the optional developer registry, pictures, Microsoft
   sign-in, and the jars a modpack import fetches. It is kept as `proxy` in `settings.json`, and
   `horizon-launcher settings proxy http://127.0.0.1:7890` sets it too ("default" removes it).
   Without one, `HTTPS_PROXY` and `HTTP_PROXY` are used when the launcher is started with them, and
   `NO_PROXY` names the hosts to reach directly, a modpack import's jars included. A server on this
   computer never goes through it.
-- **Links**: the Discord invite, the Sponsors page and the website come from `launcher/links.json` on main
-  (`{"discord": "...", "sponsor": "...", "website": "..."}`), so they change without a launcher release. Offline,
-  the launcher uses the same values built in; an empty address hides its button.
+- **Links**: the launcher reads Discord, sponsor and website addresses from `launcher/links.json`
+  on this project's main branch, so they can change without a launcher release. An empty address
+  hides that link. If the file can't be read, the built-in defaults hide Discord and sponsor, and
+  point Website to this project's GitHub page.
 
 Long pages, dialogs, the server console and data previews have a visible scrollbar when
 their content overflows. Drag the thumb or click the track to navigate without a mouse wheel.
@@ -128,13 +131,13 @@ minimize, maximize/restore and close; macOS and Linux keep their system title ba
 
 ## Updates
 
-The launcher looks for a newer Horizon release when it starts and every 30 minutes while it
-is open, and shows a small "available, Install" line on Play.
+The launcher looks for a newer Minecraft: Rust Edition release when it starts and every 30 minutes
+while it is open, and shows a small "available, Install" line on Play.
 
-It also updates itself from GitHub releases tagged `launcher@X.Y.Z` (Horizon's own are `vX.Y.Z`;
-neither is ever taken for the other). Before 0.2 they were `launcher-vX.Y.Z` and `vYYYY.MM.DD`:
-every 0.2 tag counts as newer than all of those (docs/versioning.md). It downloads the new build, replaces its
-own binary, and offers "Restart" in the footer. Development builds and
+It also updates itself from GitHub releases tagged `launcher@X.Y.Z` (game releases use `vX.Y.Z`;
+the two tag styles are never confused). Before 0.2, the tags were `launcher-vX.Y.Z` and `vYYYY.MM.DD`:
+every 0.2 tag counts as newer than all of those (docs/versioning.md). It downloads the new build,
+replaces its own binary, and offers "Restart" in the footer. Development builds and
 `HORIZON_LAUNCHER_NO_SELF_UPDATE=1` never replace themselves.
 
 On Linux a release build that starts writes its applications-menu entry only when there is
@@ -254,19 +257,20 @@ Credential Manager, or the Secret Service on Linux), never in a file, a log or t
 in until the launcher closes. When the game starts, it gets the session in a private file it
 deletes as soon as it has read it. Sign out removes the tokens.
 
-Sign-in needs Horizon's own Azure app registration: its client ID is built in from
-`HORIZON_MSA_CLIENT_ID` (and `HORIZON_MSA_CLIENT_ID` at run time overrides it; empty = not
-configured). How it works: [docs/microsoft-account.md](../docs/microsoft-account.md).
+Direct sign-in needs an Azure app registration for Minecraft: Rust Edition. Builds can include its
+ID with `HORIZON_MSA_CLIENT_ID`; the same variable overrides it at run time. Leave it empty to
+disable direct sign-in. How it works: [docs/microsoft-account.md](../docs/microsoft-account.md).
 
 ## Logs and crash reports
 
 The game writes its log to `logs/latest.log` in the game folder (`HORIZON_HOME`, else
-`~/.local/share/horizon`, `~/Library/Application Support/horizon` or `%APPDATA%\horizon`), and
-archives the previous one at start as `logs/<date>-<n>.log.gz`, as Minecraft does. When it
+`~/.local/share/minecraft-rust-edition`, `~/Library/Application Support/minecraft-rust-edition` or
+`%APPDATA%\minecraft-rust-edition`), and archives the previous one at start as
+`logs/<date>-<n>.log.gz`, as Minecraft does. When it
 crashes it writes `crash-reports/crash-<date>_<time>-client.txt` beside them. When a game the
-launcher started crashes, the Play page says so, with buttons to open or copy the report, open the
-logs folder and report it on Discord; Settings has the logs folder too. A crash report leaves the
-machine only if you turn on crash reports (below).
+launcher started crashes, the Play page offers buttons to open or copy the report and open the logs
+folder. It adds a Report on Discord button only when a Discord link is configured. Settings has the
+logs folder too. A crash report leaves the machine only if you turn on crash reports (below).
 
 ## Data collection
 
@@ -304,10 +308,9 @@ On Windows, `cargo test --bin horizon-launcher desktop_list_renders_the_viewport
     cargo build --release
 
 On NixOS, `nix-shell` in this folder provides the libraries GPUI links to (Wayland, X11,
-xkbcommon, Vulkan, fontconfig). macOS needs Xcode's command line tools. The `launcher`
-workflow builds all three platforms on every push to the `launcher` branch (or a
-`launcher-*` one), then installs the latest Horizon into a temporary folder and checks that the
-client starts (`--help`) and that the binaries import only system libraries (Windows).
+xkbcommon, Vulkan, fontconfig). macOS needs Xcode's command line tools. The manual
+`Rust Edition source builds` workflow builds Linux, macOS and Windows test packages, then
+checks local installation in a temporary folder. These artifacts are not signed releases.
 
     cargo test --lib    # tag separation, version order, update selection, notes as text,
                         # the auto-install default, the links fallback

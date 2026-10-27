@@ -43,7 +43,7 @@ pub(super) fn agent(url: &str) -> ureq::Agent {
 pub fn refuse(file: &FileRef) -> Option<String> {
     if !HOSTS.iter().any(|h| file.url.starts_with(h)) {
         return Some(format!(
-            "{} isn't on Modrinth's, CurseForge's or Horizon's file servers.",
+            "{} isn't hosted by Modrinth, CurseForge, or this project.",
             file.url
         ));
     }

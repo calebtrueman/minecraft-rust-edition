@@ -80,7 +80,7 @@ fn install_in(
 ) -> Result<Installed, String> {
     let p = index
         .project(id)
-        .ok_or_else(|| format!("{id} isn't in Horizon's registry."))?;
+        .ok_or_else(|| format!("{id} isn't in the dev registry."))?;
     if p.kind != idx::Kind::Modpack {
         return Err(format!("{} is a {}, not a modpack.", p.name, p.kind.name()));
     }

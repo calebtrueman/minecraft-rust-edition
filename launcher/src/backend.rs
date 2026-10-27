@@ -568,7 +568,7 @@ fn unpack(archive: &Path, url: &str, to: &Path) -> Result<(), String> {
 pub fn install(release: &Release, progress: impl Fn(f32)) -> Result<(), String> {
     let tag = release.tag.as_str();
     if !is_game_tag(tag) {
-        return Err(format!("{tag} is not a Horizon release."));
+        return Err(format!("{tag} is not a Minecraft: Rust Edition release."));
     }
     let (url, size) = release
         .asset
@@ -859,7 +859,9 @@ fn sounds_in(resources: &Path) -> bool {
 pub fn resources_summary(prepared: bool, sounds: bool, version: &str) -> String {
     match (prepared, sounds) {
         (false, _) => {
-            format!("Not prepared. Horizon needs the files of your own Minecraft {version}.")
+            format!(
+                "Not ready. Prepare this game with files from your Minecraft {version} install."
+            )
         }
         (true, true) => format!("Prepared for Minecraft {version}"),
         (true, false) => format!(
@@ -1417,16 +1419,16 @@ fn download_for_owner(
                 sources::Os::Windows => "windows",
             };
             mojang::download(pins, dir, os, 8, fetch, log).map_err(|e| {
-                format!("\n  • Horizon tried to download {v} from Mojang for {name}, but: {e}")
+                format!("\n  • The launcher couldn't download {v} from Mojang for {name}: {e}")
             })
         }
         Ok(Some((name, false))) => Err(format!(
-            "\n  • {name}, the signed-in account, doesn't own Minecraft: Java Edition, so Horizon \
+            "\n  • {name}, the signed-in account, doesn't own Minecraft: Java Edition, so the launcher \
              can't download it."
         )),
         Ok(None) => Err(format!(
-            "\n  • Or sign in with the Microsoft account that owns Minecraft: Horizon then \
-             downloads {v} from Mojang itself."
+            "\n  • Or sign in with the Microsoft account that owns Minecraft: Java Edition so the \
+             launcher can download {v} from Mojang."
         )),
         Err(e) => Err(format!(
             "\n  • Downloading {v} from Mojang needs your Microsoft account, which could not be \
@@ -1487,7 +1489,9 @@ fn java(
     };
     let runtime = data_dir().join("minecraft").join("runtime");
     let home = mojang::java_runtime(&component, &runtime, 8, &fetch, log).map_err(|e| {
-        format!("{missing}\n  • Horizon also tried to download Minecraft's own Java from Mojang, but: {e}")
+        format!(
+            "{missing}\n  • The launcher also couldn't download Minecraft's Java from Mojang: {e}"
+        )
     })?;
     find(major, &[home]).map(|jdk| jdk.home())
 }
@@ -1558,7 +1562,7 @@ pub fn preparer(
             .and_then(|lock| sources::Pins::read(&lock))
             .ok_or("The version's research-lock.json doesn't pin the Minecraft files")?;
         let own = data_dir().join("minecraft");
-        let mut known = vec![("Horizon's own download", own.clone())];
+        let mut known = vec![("the launcher's cache", own.clone())];
         known.extend(
             sources::Folders::current()
                 .map(|f| sources::known_folders(sources::Os::current(), &f))
@@ -1982,11 +1986,11 @@ pub fn client_command(tag: &str) -> Command {
     cmd.current_dir(home).arg("--resources").arg(resources(tag));
     // PipeWire remembers volume and mute per application name. The game's own name is
     // "PipeWire ALSA [horizon-client]", shared with development and test runs, where
-    // muting it once left every later game silent: played from here it is "Horizon".
+    // muting it once left every later game silent: played from here it is Minecraft: Rust Edition.
     if std::env::var_os("PIPEWIRE_PROPS").is_none() {
         cmd.env(
             "PIPEWIRE_PROPS",
-            "{ application.name = \"Horizon\" media.role = \"Game\" }",
+            "{ application.name = \"Minecraft: Rust Edition\" media.role = \"Game\" }",
         );
     }
     cmd
@@ -2129,7 +2133,7 @@ pub fn release_notes(tag: Option<&str>) -> Result<Release, String> {
         Some(tag) => releases
             .into_iter()
             .find(|r| r.tag == tag)
-            .ok_or_else(|| format!("No Horizon release is tagged {tag}.")),
+            .ok_or_else(|| format!("No Minecraft: Rust Edition release is tagged {tag}.")),
         None => releases
             .into_iter()
             .next()
@@ -2295,7 +2299,7 @@ pub fn install_tag(tag: &str, as_update: bool, progress: impl Fn(f32)) -> Result
         releases
             .iter()
             .find(|r| r.tag == tag)
-            .ok_or_else(|| format!("No Horizon release is tagged {tag}."))?
+            .ok_or_else(|| format!("No Minecraft: Rust Edition release is tagged {tag}."))?
     };
     if release.asset.is_none() {
         return Err(format!("{} has no build for this platform.", release.tag));
@@ -3001,10 +3005,9 @@ mod tests {
         let silent = resources_summary(true, false, "26.3");
         assert!(silent.contains("without its sounds") && silent.contains("Prepare again"));
         // Not prepared says only that, sounds or not.
-        assert_eq!(
-            resources_summary(false, false, "26.3"),
-            resources_summary(false, true, "26.3")
-        );
+        let not_ready = "Not ready. Prepare this game with files from your Minecraft 26.3 install.";
+        assert_eq!(resources_summary(false, false, "26.3"), not_ready);
+        assert_eq!(resources_summary(false, true, "26.3"), not_ready);
     }
 
     #[test]
@@ -3017,9 +3020,10 @@ mod tests {
             .get_envs()
             .find(|(k, _)| *k == "PIPEWIRE_PROPS")
             .and_then(|(_, v)| v);
-        assert!(props.is_some_and(|v| v
-            .to_string_lossy()
-            .contains("application.name = \"Horizon\"")));
+        assert_eq!(
+            props.map(|value| value.to_string_lossy().into_owned()),
+            Some("{ application.name = \"Minecraft: Rust Edition\" media.role = \"Game\" }".into())
+        );
     }
 
     #[test]
