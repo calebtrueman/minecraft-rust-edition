@@ -3,7 +3,9 @@
 //! This module provides the `Configuration` struct which contains all settings
 //! needed to configure and run the VM.
 
-use super::{MainModule, ModuleExport, ModuleOpens, ModulePatch, ModuleRead};
+use super::{
+    MainModule, MethodExecutionPolicy, ModuleExport, ModuleOpens, ModulePatch, ModuleRead,
+};
 use crate::IntrinsicMethod;
 use ahash::{AHashMap, AHashSet};
 pub use ristretto_classfile::VerifyMode;
@@ -42,6 +44,8 @@ pub struct Configuration {
     pub(super) preview_features: bool,
     pub(super) verify_mode: VerifyMode,
     pub(super) max_java_stack_size: usize,
+    /// Optional policy for calls into selected Java classes.
+    pub(super) method_execution_policy: Option<MethodExecutionPolicy>,
     // Garbage collector
     pub(super) garbage_collector: Option<Arc<GarbageCollector>>,
     // JPMS module configuration fields
@@ -191,6 +195,12 @@ impl Configuration {
         self.max_java_stack_size
     }
 
+    /// Returns the optional method execution policy for this VM.
+    #[must_use]
+    pub fn method_execution_policy(&self) -> Option<&MethodExecutionPolicy> {
+        self.method_execution_policy.as_ref()
+    }
+
     /// Returns the garbage collector, if one was configured.
     ///
     /// Returns `None` if no garbage collector was explicitly configured,
@@ -327,6 +337,7 @@ impl Debug for Configuration {
             .field("preview_features", &self.preview_features)
             .field("verify_mode", &self.verify_mode)
             .field("max_java_stack_size", &self.max_java_stack_size)
+            .field("method_execution_policy", &self.method_execution_policy)
             .field("module_path", &self.module_path)
             .field("upgrade_module_path", &self.upgrade_module_path)
             .field("main_module", &self.main_module)

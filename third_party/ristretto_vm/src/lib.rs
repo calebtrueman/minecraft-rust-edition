@@ -92,8 +92,8 @@ mod vm;
 
 pub use compiler::{CompiledClasses, Compiler, CompilerError, JavaSource};
 pub use configuration::{
-    Configuration, ConfigurationBuilder, MainModule, ModuleExport, ModuleOpens, ModulePatch,
-    ModuleRead, VerifyMode,
+    Configuration, ConfigurationBuilder, MainModule, MethodExecutionPolicy, ModuleExport,
+    ModuleOpens, ModulePatch, ModuleRead, VerifyMode,
 };
 pub(crate) use frame::Frame;
 pub use java_object::JavaObject;

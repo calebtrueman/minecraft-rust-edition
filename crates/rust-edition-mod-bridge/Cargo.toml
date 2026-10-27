@@ -1,0 +1,15 @@
+[package]
+name = "rust-edition-mod-bridge"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version = "1.85"
+description = "Small local bridge between the Rust game client and an optional mod helper"
+
+[dependencies]
+getrandom = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1.0.151"
+
+[lints]
+workspace = true

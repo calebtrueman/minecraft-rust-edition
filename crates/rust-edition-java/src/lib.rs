@@ -11,7 +11,9 @@ use std::sync::Arc;
 
 use ristretto_vm::{ConfigurationBuilder, IntrinsicMethod, VM};
 
-pub use ristretto_vm::{Parameters, RustValue, SyncIntrinsicMethod, Thread, Value};
+pub use ristretto_vm::{
+    MethodExecutionPolicy, Parameters, RustValue, SyncIntrinsicMethod, Thread, Value,
+};
 
 /// The callback result type used by Rust implementations of Java native methods.
 pub type NativeResult<T> = ristretto_vm::Result<T>;
@@ -109,7 +111,7 @@ impl JavaVm {
         class_paths: &[PathBuf],
         native_methods: impl IntoIterator<Item = NativeMethod>,
     ) -> Result<Self> {
-        Self::new_inner(java_home, class_paths, native_methods, None).await
+        Self::new_inner(java_home, class_paths, native_methods, None, None).await
     }
 
     /// Start an interpreted Java 25 VM with caller-owned state for its native methods.
@@ -128,7 +130,42 @@ impl JavaVm {
         host_context: Arc<T>,
     ) -> Result<Self> {
         let host_context: Arc<dyn Any + Send + Sync> = host_context;
-        Self::new_inner(java_home, class_paths, native_methods, Some(host_context)).await
+        Self::new_inner(
+            java_home,
+            class_paths,
+            native_methods,
+            Some(host_context),
+            None,
+        )
+        .await
+    }
+
+    /// Start an interpreted Java 25 VM with caller-owned native state and a method execution
+    /// policy.
+    ///
+    /// The policy can block methods owned by selected Java classes. Ristretto checks every method
+    /// call, including calls to inherited methods on instances whose runtime class is blocked.
+    /// This is a narrow host guard, not a sandbox: it does not restrict field access, reflection,
+    /// or other ways Java code may interact with its environment.
+    ///
+    /// See [`JavaVm::new`] for the Java home and class path requirements, and
+    /// [`JavaVm::new_with_host_context`] for the lifetime of the native state.
+    pub async fn new_with_host_context_and_policy<T: Any + Send + Sync>(
+        java_home: impl AsRef<Path>,
+        class_paths: &[PathBuf],
+        native_methods: impl IntoIterator<Item = NativeMethod>,
+        host_context: Arc<T>,
+        method_policy: MethodExecutionPolicy,
+    ) -> Result<Self> {
+        let host_context: Arc<dyn Any + Send + Sync> = host_context;
+        Self::new_inner(
+            java_home,
+            class_paths,
+            native_methods,
+            Some(host_context),
+            Some(method_policy),
+        )
+        .await
     }
 
     /// Returns this VM's context when it has the requested type.
@@ -137,11 +174,26 @@ impl JavaVm {
         self.vm.host_context()?.downcast::<T>().ok()
     }
 
+    /// Returns whether two values hold the same Java object reference.
+    ///
+    /// This compares reference identity only; it does not check which VM created either value.
+    /// Callers should compare values from the same VM. `null` matches `null`, while primitive
+    /// values do not have an object identity.
+    #[must_use]
+    pub fn same_object(&self, left: &Value, right: &Value) -> bool {
+        match (left, right) {
+            (Value::Object(Some(left)), Value::Object(Some(right))) => left.ptr_eq(right),
+            (Value::Object(None), Value::Object(None)) => true,
+            _ => false,
+        }
+    }
+
     async fn new_inner(
         java_home: impl AsRef<Path>,
         class_paths: &[PathBuf],
         native_methods: impl IntoIterator<Item = NativeMethod>,
         host_context: Option<Arc<dyn Any + Send + Sync>>,
+        method_policy: Option<MethodExecutionPolicy>,
     ) -> Result<Self> {
         let java_home = java_home.as_ref();
         validate_java_home(java_home)?;
@@ -166,6 +218,9 @@ impl JavaVm {
             .batch_compilation(false);
         if let Some(host_context) = host_context {
             builder = builder.host_context(host_context);
+        }
+        if let Some(method_policy) = method_policy {
+            builder = builder.method_execution_policy(method_policy);
         }
         let mut signatures = HashSet::new();
         for method in native_methods {
@@ -211,6 +266,26 @@ impl JavaVm {
     ) -> Result<Option<Value>> {
         self.vm
             .invoke(class_name, method_signature, arguments)
+            .await
+            .map_err(Error::from)
+    }
+
+    /// Create a Java object by calling its constructor.
+    ///
+    /// `parameter_descriptor` is the constructor's JVM parameter list without parentheses or a
+    /// return type, such as `Lnet/fabricmc/api/EnvType;`. This is useful for bootstrapping Java
+    /// APIs from Rust.
+    ///
+    /// # Errors
+    /// Returns Java loading, verification or execution errors from the constructor.
+    pub async fn new_object(
+        &self,
+        class_name: &str,
+        parameter_descriptor: &str,
+        arguments: &[impl RustValue],
+    ) -> Result<Value> {
+        self.vm
+            .object(class_name, parameter_descriptor, arguments)
             .await
             .map_err(Error::from)
     }

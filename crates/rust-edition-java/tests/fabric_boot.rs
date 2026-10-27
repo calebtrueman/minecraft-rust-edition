@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ristretto_vm::{Error as VmError, Parameters};
-use rust_edition_java::{JavaVm, NativeMethod, NativeResult, Thread, Value};
+use rust_edition_java::{JavaVm, NativeMethod, NativeResult, RustValue, Thread, Value};
 use serde_json::Value as JsonValue;
 use zip::ZipArchive;
 
@@ -26,9 +26,11 @@ const ASM_UTIL_JAR: &str = "RUST_EDITION_JAVA_FABRIC_ASM_UTIL_JAR";
 const MIXIN_JAR: &str = "RUST_EDITION_JAVA_FABRIC_MIXIN_JAR";
 
 const TEST_MOD: &str = r#"
+package dev.rustedition.probe;
+
 import net.fabricmc.api.ModInitializer;
 
-public final class TestMod implements ModInitializer {
+public final class TestMod implements ModInitializer, SnapshotTick {
     public static native int hostCall();
 
     @Override
@@ -37,62 +39,19 @@ public final class TestMod implements ModInitializer {
         System.setProperty("probe.host_callback_result", Integer.toString(calls));
         System.setProperty("probe.test_mod_initialized", "yes");
     }
+
+    @Override
+    public String onSnapshot(String snapshotJson) {
+        return Integer.toString(snapshotJson.hashCode() + hostCall());
+    }
 }
 "#;
 
-const BOOT_PROBE: &str = r#"
-import java.util.List;
-import net.fabricmc.api.EnvType;
-import net.fabricmc.api.ModInitializer;
-import net.fabricmc.loader.api.FabricLoader;
-import net.fabricmc.loader.impl.launch.knot.Knot;
+const SNAPSHOT_TICK: &str = r#"
+package dev.rustedition.probe;
 
-public final class BootProbe {
-    public static int run() {
-        try {
-            System.setProperty("java.class.path", "JAVA_CLASS_PATH");
-            System.setProperty("user.home", "GAME_DIR");
-            System.setProperty("user.dir", "GAME_DIR");
-            System.setProperty("java.io.tmpdir", "GAME_DIR/tmp");
-            System.setProperty("fabric.gameVersion", "26.3");
-            System.setProperty("fabric.gameJarPath", "GAME_JAR");
-            System.setProperty("fabric.addMods", "MOD_JAR");
-            System.setProperty("fabric.modsFolder", "GAME_DIR/mods");
-            System.setProperty("fabric.log.file", "GAME_DIR/fabric.log");
-            Knot knot = new Knot(EnvType.CLIENT);
-            knot.init(new String[] {"--gameDir", "GAME_DIR", "--version", "26.3"});
-            List<ModInitializer> entrypoints = FabricLoader.getInstance()
-                    .getEntrypoints("main", ModInitializer.class);
-            for (ModInitializer entrypoint : entrypoints) {
-                entrypoint.onInitialize();
-            }
-            return 0;
-        } catch (Throwable error) {
-            StringBuilder detail = new StringBuilder();
-            for (Throwable cause = error; cause != null; cause = cause.getCause()) {
-                detail.append(cause.getClass().getName()).append(": ")
-                        .append(String.valueOf(cause.getMessage())).append("\n");
-                for (StackTraceElement frame : cause.getStackTrace()) {
-                    detail.append("  at ").append(frame).append("\n");
-                }
-            }
-            System.setProperty("probe.error", detail.toString());
-            return -1;
-        }
-    }
-
-    public static String error() {
-        return System.getProperty("probe.error", "");
-    }
-
-    public static String marker() {
-        return System.getProperty("probe.test_mod_initialized", "");
-    }
-
-    public static String callbackResult() {
-        return System.getProperty("probe.host_callback_result", "");
-    }
-
+public interface SnapshotTick {
+    String onSnapshot(String snapshotJson);
 }
 "#;
 
@@ -259,8 +218,74 @@ fn host_call(thread: Arc<Thread>, _parameters: Parameters) -> NativeResult<Optio
     Ok(Some(Value::Int(result)))
 }
 
+async fn invoke_value(
+    vm: &JavaVm,
+    class_name: &str,
+    method_signature: &str,
+    arguments: &[impl RustValue],
+) -> Result<Value, Box<dyn std::error::Error>> {
+    vm.invoke(class_name, method_signature, arguments)
+        .await?
+        .ok_or_else(|| format!("{class_name}.{method_signature} returned no value").into())
+}
+
+async fn set_property(
+    vm: &JavaVm,
+    key: &str,
+    value: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let _ = vm
+        .invoke(
+            "java.lang.System",
+            "setProperty(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
+            &[key, value],
+        )
+        .await?;
+    Ok(())
+}
+
+async fn class_object(vm: &JavaVm, class_name: &str) -> Result<Value, Box<dyn std::error::Error>> {
+    invoke_value(
+        vm,
+        "java.lang.Class",
+        "forName(Ljava/lang/String;)Ljava/lang/Class;",
+        &[class_name],
+    )
+    .await
+}
+
+async fn java_string(vm: &JavaVm, value: &str) -> Result<Value, Box<dyn std::error::Error>> {
+    vm.new_object("java.lang.String", "Ljava/lang/String;", &[value])
+        .await
+        .map_err(Into::into)
+}
+
+async fn string_array(vm: &JavaVm, values: &[&str]) -> Result<Value, Box<dyn std::error::Error>> {
+    let string_class = class_object(vm, "java.lang.String").await?;
+    let array = invoke_value(
+        vm,
+        "java.lang.reflect.Array",
+        "newInstance(Ljava/lang/Class;I)Ljava/lang/Object;",
+        &[string_class, Value::Int(i32::try_from(values.len())?)],
+    )
+    .await?;
+
+    for (index, value) in values.iter().enumerate() {
+        let value = java_string(vm, value).await?;
+        let arguments = [array.clone(), Value::Int(i32::try_from(index)?), value];
+        let _ = vm
+            .invoke(
+                "java.lang.reflect.Array",
+                "set(Ljava/lang/Object;ILjava/lang/Object;)V",
+                &arguments,
+            )
+            .await?;
+    }
+    Ok(array)
+}
+
 #[tokio::test(flavor = "multi_thread")]
-async fn fabric_loader_runs_a_mod_entrypoint_and_calls_a_rust_native_method()
+async fn rust_bootstrap_starts_fabric_and_calls_a_mod_snapshot_method()
 -> Result<(), Box<dyn std::error::Error>> {
     let Some(opt_in) = env::var_os(OPT_IN) else {
         eprintln!(
@@ -297,12 +322,10 @@ async fn fabric_loader_runs_a_mod_entrypoint_and_calls_a_rust_native_method()
     let mods_dir = game_dir.join("mods");
     let java_temp_dir = game_dir.join("tmp");
     let classpath_dir = scratch.0.join("classpath");
-    let classes_dir = scratch.0.join("probe-classes");
     let mod_classes = scratch.0.join("mod-classes");
     fs::create_dir_all(&mods_dir)?;
     fs::create_dir_all(&java_temp_dir)?;
     fs::create_dir_all(&classpath_dir)?;
-    fs::create_dir_all(&classes_dir)?;
     fs::create_dir_all(&mod_classes)?;
 
     let loader_jar = copy_jar(&loader_source, &classpath_dir, "fabric-loader.jar")?;
@@ -330,13 +353,16 @@ async fn fabric_loader_runs_a_mod_entrypoint_and_calls_a_rust_native_method()
     }
 
     let mod_source = scratch.0.join("TestMod.java");
+    let tick_source = scratch.0.join("SnapshotTick.java");
     fs::write(&mod_source, TEST_MOD)?;
+    fs::write(&tick_source, SNAPSHOT_TICK)?;
     let compile_mod = Command::new(&javac)
         .args(["--release", "25", "-g:none", "-cp"])
         .arg(&loader_jar)
         .arg("-d")
         .arg(&mod_classes)
         .arg(&mod_source)
+        .arg(&tick_source)
         .output()?;
     if !compile_mod.status.success() {
         return Err(format!(
@@ -350,7 +376,7 @@ async fn fabric_loader_runs_a_mod_entrypoint_and_calls_a_rust_native_method()
     fs::write(
         &metadata_path,
         format!(
-            r#"{{"schemaVersion":1,"id":"probe_mod","version":"1.0.0","entrypoints":{{"main":["TestMod"]}},"depends":{{"fabricloader":">={LOADER_VERSION}","minecraft":"{GAME_VERSION}"}}}}"#
+            r#"{{"schemaVersion":1,"id":"probe_mod","version":"1.0.0","entrypoints":{{"main":["dev.rustedition.probe.TestMod"]}},"depends":{{"fabricloader":">={LOADER_VERSION}","minecraft":"{GAME_VERSION}"}}}}"#
         ),
     )?;
     let mod_jar = mods_dir.join("probe-mod.jar");
@@ -383,39 +409,25 @@ async fn fabric_loader_runs_a_mod_entrypoint_and_calls_a_rust_native_method()
         asm_tree_jar,
         asm_util_jar,
         mixin_jar,
-        classes_dir.clone(),
     ];
-    let class_path = env::join_paths(&class_paths)?;
-    let boot_probe_source = scratch.0.join("BootProbe.java");
-    let boot_probe_source_text = BOOT_PROBE
-        .replace("GAME_DIR", &java_string(&game_dir.to_string_lossy()))
-        .replace("GAME_JAR", &java_string(&game_jar.to_string_lossy()))
-        .replace("MOD_JAR", &java_string(&mod_jar.to_string_lossy()))
-        .replace(
-            "JAVA_CLASS_PATH",
-            &java_string(&class_path.to_string_lossy()),
-        );
-    fs::write(&boot_probe_source, boot_probe_source_text)?;
-    let compile_probe = Command::new(&javac)
-        .args(["--release", "25", "-g:none", "-cp"])
-        .arg(&class_path)
-        .arg("-d")
-        .arg(&classes_dir)
-        .arg(&boot_probe_source)
-        .output()?;
-    if !compile_probe.status.success() {
-        return Err(format!(
-            "javac failed to build the boot probe: {}",
-            String::from_utf8_lossy(&compile_probe.stderr)
-        )
-        .into());
-    }
 
+    let class_path = env::join_paths(&class_paths)?
+        .to_string_lossy()
+        .into_owned();
+    let game_dir_path = game_dir.to_string_lossy().into_owned();
+    let game_jar_path = game_jar.to_string_lossy().into_owned();
+    let mod_jar_path = mod_jar.to_string_lossy().into_owned();
+    let java_temp_dir_path = java_temp_dir.to_string_lossy().into_owned();
+    let mods_dir_path = mods_dir.to_string_lossy().into_owned();
+    let fabric_log_path = game_dir.join("fabric.log").to_string_lossy().into_owned();
     let callback_count = Arc::new(AtomicUsize::new(0));
     let vm = JavaVm::new_with_host_context(
         &library_home,
         &class_paths,
-        [NativeMethod::sync("TestMod.hostCall()I", host_call)],
+        [NativeMethod::sync(
+            "dev/rustedition/probe/TestMod.hostCall()I",
+            host_call,
+        )],
         Arc::clone(&callback_count),
     )
     .await?;
@@ -426,54 +438,169 @@ async fn fabric_loader_runs_a_mod_entrypoint_and_calls_a_rust_native_method()
         )
         .into());
     }
-
-    let boot_result = vm
-        .invoke("BootProbe", "run()I", &[] as &[i32])
-        .await?
-        .ok_or("BootProbe.run() returned no value")?;
-    if boot_result.as_i32()? != 0 {
-        let error = vm
-            .invoke("BootProbe", "error()Ljava/lang/String;", &[] as &[i32])
-            .await?
-            .ok_or("BootProbe.error() returned no value")?;
-        return Err(format!("Fabric boot failed:\n{}", error.as_string()?).into());
+    for (key, value) in [
+        ("java.class.path", class_path.as_str()),
+        ("user.home", game_dir_path.as_str()),
+        ("user.dir", game_dir_path.as_str()),
+        ("java.io.tmpdir", java_temp_dir_path.as_str()),
+        ("fabric.gameVersion", GAME_VERSION),
+        ("fabric.gameJarPath", game_jar_path.as_str()),
+        ("fabric.addMods", mod_jar_path.as_str()),
+        ("fabric.modsFolder", mods_dir_path.as_str()),
+        ("fabric.log.file", fabric_log_path.as_str()),
+    ] {
+        set_property(&vm, key, value).await?;
     }
 
-    let marker = probe_string(&vm, "marker()Ljava/lang/String;").await?;
-    let callback_result = probe_string(&vm, "callbackResult()Ljava/lang/String;").await?;
-    if marker != "yes" {
-        let error = vm
-            .invoke("BootProbe", "error()Ljava/lang/String;", &[] as &[i32])
-            .await?
-            .ok_or("BootProbe.error() returned no value")?;
+    let env_type = invoke_value(
+        &vm,
+        "net.fabricmc.api.EnvType",
+        "valueOf(Ljava/lang/String;)Lnet/fabricmc/api/EnvType;",
+        &["CLIENT"],
+    )
+    .await?;
+    let knot = vm
+        .new_object(
+            "net.fabricmc.loader.impl.launch.knot.Knot",
+            "Lnet/fabricmc/api/EnvType;",
+            &[env_type],
+        )
+        .await?;
+    let arguments = string_array(
+        &vm,
+        &[
+            "--gameDir",
+            game_dir_path.as_str(),
+            "--version",
+            GAME_VERSION,
+        ],
+    )
+    .await?;
+    let arguments = [knot.clone(), arguments];
+    let _ = vm
+        .invoke(
+            "net.fabricmc.loader.impl.launch.knot.Knot",
+            "init([Ljava/lang/String;)Ljava/lang/ClassLoader;",
+            &arguments,
+        )
+        .await?;
+
+    let loader = invoke_value(
+        &vm,
+        "net.fabricmc.loader.api.FabricLoader",
+        "getInstance()Lnet/fabricmc/loader/api/FabricLoader;",
+        &[] as &[i32],
+    )
+    .await?;
+    let event_name = java_string(&vm, "main").await?;
+    let initializer_class = class_object(&vm, "net.fabricmc.api.ModInitializer").await?;
+    let entrypoint_arguments = [loader, event_name, initializer_class];
+    let entrypoints = invoke_value(
+        &vm,
+        "net.fabricmc.loader.api.FabricLoader",
+        "getEntrypoints(Ljava/lang/String;Ljava/lang/Class;)Ljava/util/List;",
+        &entrypoint_arguments,
+    )
+    .await?;
+    let entrypoint_count = invoke_value(
+        &vm,
+        "java.util.List",
+        "size()I",
+        std::slice::from_ref(&entrypoints),
+    )
+    .await?
+    .as_i32()?;
+    if entrypoint_count <= 0 {
+        return Err("Fabric did not find any main entrypoints".into());
+    }
+
+    let snapshot_tick_class = class_object(&vm, "dev.rustedition.probe.SnapshotTick").await?;
+    let snapshot_json = r#"{"world_open":true,"player":{"x":17.5,"y":4.0,"z":20.25,"yaw":90.0,"pitch":-10.5,"health":19.0,"dimension":"minecraft:overworld"},"clock":{"game_time":12345,"day_time":6789}}"#;
+    let expected_snapshot_result = java_string_hash(snapshot_json).wrapping_add(2);
+    let mut snapshot_result = None;
+    for index in 0..entrypoint_count {
+        let arguments = [entrypoints.clone(), Value::Int(index)];
+        let entrypoint = invoke_value(
+            &vm,
+            "java.util.List",
+            "get(I)Ljava/lang/Object;",
+            &arguments,
+        )
+        .await?;
+        let _ = vm
+            .invoke(
+                "net.fabricmc.api.ModInitializer",
+                "onInitialize()V",
+                std::slice::from_ref(&entrypoint),
+            )
+            .await?;
+
+        let is_snapshot_tick = invoke_value(
+            &vm,
+            "java.lang.Class",
+            "isInstance(Ljava/lang/Object;)Z",
+            &[snapshot_tick_class.clone(), entrypoint.clone()],
+        )
+        .await?
+        .as_i32()?;
+        if is_snapshot_tick != 0 {
+            if snapshot_result.is_some() {
+                return Err("more than one main entrypoint implements SnapshotTick".into());
+            }
+            let snapshot_json = java_string(&vm, snapshot_json).await?;
+            let arguments = [entrypoint, snapshot_json];
+            let result = invoke_value(
+                &vm,
+                "dev.rustedition.probe.SnapshotTick",
+                "onSnapshot(Ljava/lang/String;)Ljava/lang/String;",
+                &arguments,
+            )
+            .await?;
+            snapshot_result = Some(result.as_string()?.to_owned());
+        }
+    }
+
+    let marker = system_property(&vm, "probe.test_mod_initialized").await?;
+    let callback_result = system_property(&vm, "probe.host_callback_result").await?;
+    if marker != "yes" || callback_result != "1" {
         return Err(format!(
-            "Fabric did not run TestMod.onInitialize(); marker was {marker:?}. Error: {}",
-            error.as_string()?
+            "Fabric did not initialize the test mod: marker={marker:?}, callback result={callback_result:?}"
         )
         .into());
     }
-    if callback_result != "1" || callback_count.load(Ordering::SeqCst) != 1 {
+    if snapshot_result.as_deref() != Some(expected_snapshot_result.to_string().as_str()) {
         return Err(format!(
-            "TestMod's Rust callback should return 1 and run once; marker result={callback_result:?}, callback count={}",
+            "Fabric entrypoint did not receive the full host snapshot; expected hash {expected_snapshot_result}, got {snapshot_result:?}"
+        )
+        .into());
+    }
+    if callback_count.load(Ordering::SeqCst) != 2 {
+        return Err(format!(
+            "the Rust callback should run once at initialization and once for the snapshot; got {} calls",
             callback_count.load(Ordering::SeqCst)
         )
         .into());
     }
 
     eprintln!(
-        "Fabric boot passed: Loader {LOADER_VERSION}, Minecraft {GAME_VERSION}, test entrypoint called Rust once. Scratch files will be removed."
+        "Fabric boot passed: Loader {LOADER_VERSION}, Minecraft {GAME_VERSION}; Rust invoked Knot and Fabric entrypoints, and the test mod received one full JSON snapshot."
     );
     Ok(())
 }
 
-fn java_string(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('"', "\\\"")
+async fn system_property(vm: &JavaVm, name: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let value = invoke_value(
+        vm,
+        "java.lang.System",
+        "getProperty(Ljava/lang/String;)Ljava/lang/String;",
+        &[name],
+    )
+    .await?;
+    Ok(value.as_string()?.to_owned())
 }
 
-async fn probe_string(vm: &JavaVm, method: &str) -> Result<String, Box<dyn std::error::Error>> {
-    let result = vm
-        .invoke("BootProbe", method, &[] as &[i32])
-        .await?
-        .ok_or_else(|| format!("BootProbe.{method} returned no string"))?;
-    Ok(result.as_string()?.to_owned())
+fn java_string_hash(value: &str) -> i32 {
+    value.encode_utf16().fold(0_i32, |hash, character| {
+        hash.wrapping_mul(31).wrapping_add(i32::from(character))
+    })
 }

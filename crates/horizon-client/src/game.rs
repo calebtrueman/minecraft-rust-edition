@@ -72,6 +72,7 @@ mod initial_spawn;
 mod integrated;
 mod item_draw;
 mod item_particles;
+mod java_mod_bridge;
 mod jukebox;
 mod lan;
 mod lan_actions;
@@ -1593,6 +1594,12 @@ struct Game<'a> {
     extras: extras::ExtrasState,
     /// Horizon mods (`game/mods.rs`), none running unless turned on.
     mods: mods::ModsState,
+    /// An opt-in helper for the experimental Java/Fabric bridge.
+    java_mod_bridge: Option<rust_edition_mod_bridge::Bridge>,
+    /// Whether this helper has received any current-state snapshot yet.
+    java_mod_bridge_has_sent_snapshot: bool,
+    /// The last helper state shown to the player.
+    java_mod_bridge_reported: Option<rust_edition_mod_bridge::BridgeStatus>,
     /// Horizon's own shader pack, while one is picked (`game/native_shaders.rs`).
     native_shaders: native_shaders::NativeShaders,
     /// Meshed sections waiting for an upload budget (Horizon settings).
@@ -8552,6 +8559,7 @@ impl Game<'_> {
             title.last_server = self.settings.file.string("lastServer");
         }
         self.capture(false);
+        self.close_java_mod_bridge_world();
         Ok(())
     }
     /// Let go of every entity of the level (saved first): the next world
@@ -12440,6 +12448,8 @@ impl ApplicationHandler for Game<'_> {
         }
     }
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.poll_java_mod_bridge();
+        self.send_initial_java_mod_bridge_snapshot();
         if self.pending_save.is_some() {
             match self.poll_closing_save() {
                 Ok(true) => event_loop.exit(),
@@ -12492,6 +12502,7 @@ impl ApplicationHandler for Game<'_> {
     /// window turns it into a window close, so Minecraft.stop saves the world.
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
         self.pad_close_output();
+        self.stop_java_mod_bridge();
         if let Err(e) = self.save_for_exit() {
             log::warn!("Rust Edition: failed to save the world on exit: {e}");
         }
@@ -12821,6 +12832,9 @@ impl<'a> Game<'a> {
             frame_graph: Default::default(),
             extras: Default::default(),
             mods: Default::default(),
+            java_mod_bridge: None,
+            java_mod_bridge_has_sent_snapshot: false,
+            java_mod_bridge_reported: None,
             native_shaders: Default::default(),
             sky_darken_memo: Default::default(),
             persist: Default::default(),
@@ -13680,6 +13694,7 @@ fn start_game<'a>(
         game.mods.dev = game.options.dev_mods.clone();
         game.start_moved_extras();
         game.start_mods();
+        game.start_java_mod_bridge();
     }
     game.start_agent_control()?;
     if let Some(scenario) = game.options.benchmark.clone() {

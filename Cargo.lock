@@ -1384,6 +1384,7 @@ dependencies = [
  "naga",
  "png",
  "pollster",
+ "rust-edition-mod-bridge",
  "rustix 1.1.5",
  "serde",
  "serde_json",
@@ -3063,6 +3064,15 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "rust-edition-mod-bridge"
+version = "0.1.0"
+dependencies = [
+ "getrandom 0.3.4",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

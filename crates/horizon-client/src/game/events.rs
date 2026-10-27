@@ -55,6 +55,28 @@ pub(super) struct Events {
 }
 
 impl Events {
+    /// Adds the bounded input and reply for an opt-in helper tick. The
+    /// ordinary `seq` stays the control-event id; `bridge_seq` is the helper id.
+    pub(super) fn java_mod_reply(
+        &mut self,
+        tick: u64,
+        bridge_seq: u64,
+        status: &str,
+        snapshot_json: String,
+        value: Option<String>,
+    ) {
+        self.push(
+            tick,
+            json!({
+                "event": "java_mod_reply",
+                "bridge_seq": bridge_seq,
+                "status": status,
+                "snapshot_json": snapshot_json,
+                "value": value,
+            }),
+        );
+    }
+
     fn push(&mut self, tick: u64, mut event: Value) {
         self.seq += 1;
         event["seq"] = self.seq.into();

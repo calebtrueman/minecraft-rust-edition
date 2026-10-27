@@ -34,6 +34,7 @@ mod builder;
 #[expect(clippy::module_inception)]
 mod configuration;
 mod main_module;
+mod method_execution_policy;
 mod module_export;
 mod module_opens;
 mod module_patch;
@@ -45,6 +46,7 @@ pub(crate) const DEFAULT_MAX_JAVA_STACK_SIZE: usize = 65_536 * JAVA_STACK_SLOT_S
 pub use builder::ConfigurationBuilder;
 pub use configuration::{Configuration, VerifyMode};
 pub use main_module::MainModule;
+pub use method_execution_policy::MethodExecutionPolicy;
 pub use module_export::ModuleExport;
 pub use module_opens::ModuleOpens;
 pub use module_patch::ModulePatch;

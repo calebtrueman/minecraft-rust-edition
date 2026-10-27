@@ -1,6 +1,9 @@
 use crate::Error::{InternalError, UnsupportedClassFileVersion};
 use crate::IntrinsicMethod;
-use crate::JavaError::{RuntimeException, StackOverflowError, UnsatisfiedLinkError, VerifyError};
+use crate::JavaError::{
+    RuntimeException, StackOverflowError, UnsatisfiedLinkError, UnsupportedOperationException,
+    VerifyError,
+};
 use crate::RustValue;
 use crate::configuration::{DEFAULT_MAX_JAVA_STACK_SIZE, JAVA_STACK_SLOT_SIZE, VerifyMode};
 use crate::frame::{
@@ -132,6 +135,11 @@ impl JavaStack {
     /// Intrinsics, synchronization and JIT decisions must use the full dispatch boundary.
     /// The registry and compiler configuration are immutable for the lifetime of this VM.
     fn can_push_interpreted(&mut self, vm: &VM, call: &MethodCall) -> bool {
+        // Every call must pass through `dispatch_method` when a policy is active. The regular
+        // interpreter fast path pushes Java frames directly and would otherwise skip the guard.
+        if vm.configuration().method_execution_policy().is_some() {
+            return false;
+        }
         if vm
             .compiler()
             .is_some_and(|compiler| !compiler.is_interpreted())
@@ -1042,6 +1050,18 @@ impl Thread {
         use crate::JavaError::{ExceptionInInitializerError, NoClassDefFoundError};
         use ristretto_classloader::InitializationAction;
 
+        if !class.is_initialized()?
+            && class.class_initializer().is_some()
+            && let Some(policy) = self.vm()?.configuration().method_execution_policy()
+            && policy.blocked_class(class.name(), None).is_some()
+        {
+            return Err(UnsupportedOperationException(format!(
+                "Java class initializer {}.<clinit>()V is blocked by the host method policy",
+                class.name()
+            ))
+            .into());
+        }
+
         loop {
             let action = class.begin_initialization(self.id)?;
 
@@ -1351,6 +1371,25 @@ impl Thread {
         let method_name = method.name();
         let method_descriptor = method.descriptor();
         let vm = self.vm()?;
+
+        if let Some(policy) = vm.configuration().method_execution_policy() {
+            let receiver_class_name = if method.is_static() {
+                None
+            } else {
+                match parameters.as_slice(caller.as_deref())?.first() {
+                    Some(Value::Object(Some(reference))) => Some(reference.read().class_name()?),
+                    _ => None,
+                }
+            };
+            if let Some(blocked_class_name) =
+                policy.blocked_class(class_name, receiver_class_name.as_deref())
+            {
+                return Err(UnsupportedOperationException(format!(
+                    "Java method {class_name}.{method_name}{method_descriptor} is blocked by the host policy for class {blocked_class_name}"
+                ))
+                .into());
+            }
+        }
 
         let sync_monitor = self
             .acquire_sync_monitor(&class, &method, parameters.as_slice(caller.as_deref())?)

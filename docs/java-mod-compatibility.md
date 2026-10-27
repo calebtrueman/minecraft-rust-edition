@@ -36,21 +36,35 @@ libraries through the Rust adapter. Fabric finds a tiny original test mod and ca
 This needs eight JDK modules and the JDK's security
 configuration; the default base-only test home is too small.
 
-The game does not use this adapter yet. Starting this test mod does not prove that installed
-mods work, that their Mixins change the native game, or that their Minecraft calls reach the
-Rust game. Minecraft gameplay remains outside this test.
+Starting this test mod does not prove that installed mods work, that their Mixins change the
+native game, or that their Minecraft calls reach the Rust game.
 
-## Next step toward a game bridge
+## First game connection
 
-Build a separate, opt-in `horizon-fabric-bridge` for Java mods. Keep it out of the existing `horizon-mods` WebAssembly runtime, whose sandbox is part of its promise. The adapter can run Java code, but it does not yet limit file or network access like WebAssembly does. Do not start untrusted Java JARs in the game process until that safety boundary is in place.
+The optional `rust-edition-mod-bridge` now connects the game to a separate
+`rust-edition-fabric-host` process. The helper runs Fabric through the Rust VM. It receives
+copied player and clock values and can return a short string. The game sends no mutable game
+objects. This stays separate from the existing `horizon-mods` WebAssembly runtime.
 
-The next game test should connect one supported tick event to the loaded mod. A Rust native
-function can register its Java callback. At `Game::tick_mods` in
-`crates/horizon-client/src/game/mods.rs`, deliver a copied game snapshot and collect bounded
-actions, following the snapshot pattern already used by `crates/horizon-mods`. Never hand
-Java code a mutable pointer to `Game`.
+The test mod uses a custom `onSnapshot(String)` method. This is a test connection, not the
+Fabric tick-event API used by existing mods. The helper starts only when its executable and
+config paths are explicitly set. It reports ready after Fabric has started and the mod has
+loaded. The connection has size limits, a short queue, and reply deadlines; a failed helper
+stops receiving snapshots. Its working files go in a fresh temporary folder.
 
-First prove that route with a small Java JAR built in a test: its initializer registers the tick event, and the game test hook confirms the callback ran. Then try one installed mod whose listed classes and calls fit that same supported slice. Use `crates/horizon-port-pack/src/classes.rs` to flag Mixins and other unsupported code early; its scan is an inventory, not a loader. Add more events and Java/Fabric classes only when a fixture tests them. This path gets one selected mod through the native bridge; it does not make arbitrary Fabric mods compatible.
+The native game check passed in both local game-loop modes. It compared the Java reply
+with the exact sent snapshot and checked position, health, dimension, and clock values.
+It also checked a cleared snapshot after leaving the world and helper-folder cleanup after
+quitting. These checks use an original test mod; they do not cover installed mods.
+
+The helper blocks Java method calls on Minecraft gameplay and rendering classes while their
+Rust replacements are missing. This prevents those calls from quietly running Java gameplay.
+It is not a file or network sandbox. The helper runs with the user's operating-system access,
+so a separate process and temporary folders do not make an untrusted JAR safe.
+
+The next compatibility step is to connect actual Minecraft objects and Fabric callbacks to
+Rust game state. Existing Mixins also need a supported way to change native game behavior.
+Neither is supplied by the snapshot test. Installed mods remain unsupported.
 
 ## What a full runtime needs
 
@@ -68,8 +82,8 @@ A practical implementation would need these layers, with compatibility measured 
 
 The `horizon-jvm` prototype proves a small set of class and method operations. Its missing
 pieces still include arrays, exceptions and class initialization. The separate Ristretto
-adapter reaches the Fabric startup test described above. Neither runtime is connected to
-the game. Installed mods still need their Minecraft calls and class changes to work with
+adapter reaches the Fabric startup test and optional snapshot connection described above.
+Installed mods still need their Minecraft calls and class changes to work with
 the native game, and their behavior needs separate testing.
 
 ## Try the first slice

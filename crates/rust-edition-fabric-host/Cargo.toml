@@ -1,0 +1,25 @@
+[package]
+name = "rust-edition-fabric-host"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97.1"
+license = "MIT"
+description = "Opt-in Rust host for a configured Fabric loader probe"
+
+[dependencies]
+rust-edition-fabric = { path = "../rust-edition-fabric" }
+rust-edition-java = { path = "../rust-edition-java" }
+rust-edition-mod-bridge = { path = "../rust-edition-mod-bridge" }
+ristretto_vm = { path = "../../third_party/ristretto_vm", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[workspace]
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[patch.crates-io]
+ristretto_classloader = { path = "../../third_party/ristretto_classloader" }

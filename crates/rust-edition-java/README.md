@@ -11,10 +11,18 @@ method does not replace its bytecode.
 
 The library tests prove that Java class code can call a Rust function through Ristretto. A
 separate opt-in test starts the real Fabric Loader and Mixin, runs a tiny original mod's
-initializer, and checks that it calls Rust exactly once. The adapter is not connected to
-Minecraft: Rust Edition. This does not make installed mods work with the native game.
+initializer, and checks that it calls Rust exactly once. The optional
+[`rust-edition-fabric-host`](../rust-edition-fabric-host/README.md) uses this adapter to
+receive copied state from Minecraft: Rust Edition. This does not make installed mods work
+with the native game.
 Java tools build the test classes; the Rust adapter runs their code. Generated sources,
 classes and JARs stay in temporary folders.
+
+Callers can also supply a `MethodExecutionPolicy` that denies class-name prefixes.
+The VM checks the method's owner and receiver before running it, including calls made by
+other Java methods. It refuses blocked class startup before marking that class as starting.
+Without a policy, the existing behavior stays unchanged. This is a method-call limit,
+not a file, network, or memory sandbox.
 
 Ristretto's source and license are kept in `third_party/ristretto_vm` and
 `third_party/ristretto_classloader`. The local classloader copy fixes file URLs for paths with

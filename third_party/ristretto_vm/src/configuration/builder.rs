@@ -5,8 +5,8 @@
 
 use super::configuration::HostContext;
 use super::{
-    Configuration, DEFAULT_MAX_JAVA_STACK_SIZE, JAVA_STACK_SLOT_SIZE, MainModule, ModuleExport,
-    ModuleOpens, ModulePatch, ModuleRead, VerifyMode,
+    Configuration, DEFAULT_MAX_JAVA_STACK_SIZE, JAVA_STACK_SLOT_SIZE, MainModule,
+    MethodExecutionPolicy, ModuleExport, ModuleOpens, ModulePatch, ModuleRead, VerifyMode,
 };
 use crate::Error::InternalError;
 use crate::{IntrinsicMethod, Result};
@@ -52,6 +52,7 @@ pub struct ConfigurationBuilder {
     preview_features: bool,
     verify_mode: VerifyMode,
     max_java_stack_size: usize,
+    method_execution_policy: Option<MethodExecutionPolicy>,
     // Garbage collector
     garbage_collector: Option<Arc<GarbageCollector>>,
     // JPMS module configuration fields
@@ -102,6 +103,7 @@ impl ConfigurationBuilder {
             preview_features: false,
             verify_mode: VerifyMode::default(),
             max_java_stack_size: DEFAULT_MAX_JAVA_STACK_SIZE,
+            method_execution_policy: None,
             garbage_collector: None,
             module_path: Vec::new(),
             upgrade_module_path: Vec::new(),
@@ -236,6 +238,16 @@ impl ConfigurationBuilder {
     #[must_use]
     pub fn max_java_stack_size(mut self, max_java_stack_size: usize) -> Self {
         self.max_java_stack_size = max_java_stack_size;
+        self
+    }
+
+    /// Set an optional policy that blocks selected Java methods from running.
+    ///
+    /// The policy is checked for every method call in this VM. With no policy, method
+    /// execution is unchanged.
+    #[must_use]
+    pub fn method_execution_policy(mut self, policy: MethodExecutionPolicy) -> Self {
+        self.method_execution_policy = Some(policy);
         self
     }
 
@@ -446,6 +458,7 @@ impl ConfigurationBuilder {
             preview_features: self.preview_features,
             verify_mode: self.verify_mode,
             max_java_stack_size,
+            method_execution_policy: self.method_execution_policy,
             garbage_collector: self.garbage_collector,
             module_path: self.module_path,
             upgrade_module_path: self.upgrade_module_path,

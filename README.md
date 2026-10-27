@@ -24,10 +24,11 @@ This is work in progress, not a finished replacement for Java Edition.
   account: encrypted login, 49 loaded chunks, 25 signed chat messages, `/list` and a signed
   private command to the same player. This does not establish
   full Java multiplayer behavior or modded-server compatibility.
-- **Fabric and Java mod jars do not run in the Rust engine.** Reading a modpack's data and assets
-  is not the same as running its mods. Separate tests cover a small Rust bytecode interpreter
-  and a bridge built on the Rust-based Ristretto VM. Neither is connected to the game yet.
-  An isolated test starts Fabric and Mixin through that bridge and runs one tiny test mod.
+- **Existing Fabric mods are not supported yet.** Reading a modpack's data and assets
+  is not the same as running its mods. An isolated test starts Fabric and Mixin through the
+  Rust-based Ristretto VM and runs one tiny test mod. An optional helper now connects that
+  work to copied player and clock values from the game. It uses a custom test callback;
+  existing mods still need their Minecraft calls and Mixins connected to the Rust game.
   See [the compatibility work](docs/java-mod-compatibility.md).
 - Updates point to this fork. No fork release binaries have been published yet. Release signing
   still needs this fork's own key before distributing builds.

@@ -7,6 +7,8 @@ on:
       - 'crates/horizon-jvm/**'
       - 'crates/rust-edition-java/**'
       - 'crates/rust-edition-fabric/**'
+      - 'crates/rust-edition-fabric-host/**'
+      - 'crates/rust-edition-mod-bridge/**'
       - 'third_party/ristretto_vm/**'
       - 'third_party/ristretto_classloader/**'
       - 'tools/prepare_ristretto_java_home.py'
@@ -16,6 +18,8 @@ on:
       - 'crates/horizon-jvm/**'
       - 'crates/rust-edition-java/**'
       - 'crates/rust-edition-fabric/**'
+      - 'crates/rust-edition-fabric-host/**'
+      - 'crates/rust-edition-mod-bridge/**'
       - 'third_party/ristretto_vm/**'
       - 'third_party/ristretto_classloader/**'
       - 'tools/prepare_ristretto_java_home.py'
@@ -52,6 +56,7 @@ jobs:
     timeout-minutes: 30
     env:
       RUST_EDITION_JAVA25_HOME: ${{ github.workspace }}/.local/ristretto-evaluation/java25-modules-home
+      CARGO_TARGET_DIR: ${{ github.workspace }}/crates/rust-edition-java/target
       CARGO_INCREMENTAL: '0'
     steps:
       - uses: actions/checkout@v4
@@ -73,6 +78,23 @@ jobs:
       - run: cargo fmt --manifest-path crates/rust-edition-java/Cargo.toml --all -- --check
       - run: cargo test --release --manifest-path crates/rust-edition-java/Cargo.toml --locked
       - run: cargo clippy --release --manifest-path crates/rust-edition-java/Cargo.toml --locked --all-targets -- -D warnings
+      - run: cargo fmt --manifest-path crates/rust-edition-fabric-host/Cargo.toml --all -- --check
+      - run: cargo test --release --manifest-path crates/rust-edition-fabric-host/Cargo.toml --locked
+      - run: cargo clippy --release --manifest-path crates/rust-edition-fabric-host/Cargo.toml --locked --all-targets -- -D warnings
+
+  mod-connection:
+    name: Game and helper messages
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - run: cargo test --locked -p rust-edition-mod-bridge
+      - run: cargo clippy --locked -p rust-edition-mod-bridge --all-targets -- -D warnings
 
   fabric-metadata:
     name: Read Fabric mod files

@@ -554,6 +554,7 @@ impl Game<'_> {
         if single_player && reason.is_none() {
             self.title = Some(title);
             self.capture(false);
+            self.close_java_mod_bridge_world();
             return Ok(());
         }
         title.mode = horizon_client::title::Mode::Multiplayer(match reason {
@@ -565,6 +566,7 @@ impl Game<'_> {
         });
         self.title = Some(title);
         self.capture(false);
+        self.close_java_mod_bridge_world();
         Ok(())
     }
 

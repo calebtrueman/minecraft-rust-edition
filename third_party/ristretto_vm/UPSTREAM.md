@@ -53,6 +53,14 @@ can read it through their thread's VM. The adapter clears this state when it is 
 a callback that already holds its own `Arc` can finish safely. This does not stop Ristretto's
 Java threads or promise that the VM itself has shut down.
 
+An optional `MethodExecutionPolicy` now lets a caller deny class-name prefixes. The thread
+checks both the declared method owner and the actual receiver before method execution.
+With a policy enabled, nested interpreted calls use that same check instead of the direct
+frame-push path. Blocked class initializers are rejected before class startup begins, so
+the caller receives `UnsupportedOperationException` without marking the class as broken.
+The default configuration has no policy. This limits method calls; it does not restrict
+files, network access, reflection, or direct field access as a complete sandbox would.
+
 ## Included compiled helper files
 
 These four upstream Java 8 compiler bridge helpers are embedded by `src/compiler/bridge.rs`; the
