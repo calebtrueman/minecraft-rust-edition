@@ -13,7 +13,10 @@ use crate::string_pool::StringPool;
 use crate::thread::Thread;
 use crate::{Configuration, ConfigurationBuilder, Result, startup_trace};
 use ahash::AHashMap;
-use ristretto_classfile::{JAVA_8, JAVA_17, JAVA_21, JAVA_PREVIEW_MINOR_VERSION, Version};
+use ristretto_classfile::{
+    FieldAccessFlags, FieldType, JAVA_8, JAVA_17, JAVA_21, JAVA_PREVIEW_MINOR_VERSION, JavaStr,
+    Version,
+};
 use ristretto_classloader::manifest::MAIN_CLASS;
 use ristretto_classloader::{
     Class, ClassLoader, ClassLoaderType, ClassPath, ClassPathEntry, Object, Reference, Value,
@@ -28,6 +31,7 @@ use ristretto_types::handles::{FileHandle, HandleManager, MemberHandle};
 
 type ThreadHandle = ristretto_types::handles::ThreadHandle<Thread>;
 use portable_atomic::AtomicU64;
+use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::fmt::Debug;
 use std::io::{Read, Write};
@@ -49,6 +53,24 @@ async fn run_local<F: Future>(future: F) -> F::Output {
 #[cfg(not(target_os = "wasi"))]
 async fn run_local<F: Future>(future: F) -> F::Output {
     future.await
+}
+
+fn class_is_assignable_by_identity(target: &Arc<Class>, source: &Arc<Class>) -> Result<bool> {
+    let mut pending = vec![source.clone()];
+    let mut visited = HashSet::new();
+    while let Some(class) = pending.pop() {
+        if Arc::ptr_eq(target, &class) {
+            return Ok(true);
+        }
+        if !visited.insert(Arc::as_ptr(&class) as usize) {
+            continue;
+        }
+        if let Some(parent) = class.parent()? {
+            pending.push(parent);
+        }
+        pending.extend(class.interfaces()?);
+    }
+    Ok(false)
 }
 
 /// The offset to add to the major version to get the class file version.  Java 1.0 has a class
@@ -170,9 +192,10 @@ impl VM {
                 Self::create_class_loader(&configuration, &bootstrap_class_loader).await?;
             startup_trace!("[vm] system class loader");
 
-            let method_registry = MethodRegistry::with_overrides(
+            let method_registry = MethodRegistry::with_host_overrides(
                 &java_class_file_version,
                 configuration.native_methods().clone(),
+                configuration.host_methods().clone(),
             )?;
             startup_trace!("[vm] method registry");
 
@@ -333,6 +356,12 @@ impl VM {
 
     /// Creates the JIT compiler.
     fn create_compiler(configuration: &Configuration) -> Option<Compiler> {
+        // Compiled code can run field instructions without passing through the interpreter's
+        // host-object policy checks. Keep policy-enabled VMs on the interpreter.
+        if configuration.method_execution_policy().is_some() {
+            return None;
+        }
+
         // Cranelift-generated code currently corrupts JVM state on the Windows ARM64 ABI during
         // sufficiently complex workloads such as javac. Keep this target on the interpreter until
         // the JIT ABI boundary is reliable there.
@@ -872,6 +901,108 @@ impl VM {
             thread.class(class_name).await
         })
         .await
+    }
+
+    /// Load and link a class without initializing it.
+    ///
+    /// This resolves the class and its parent types but does not run `<clinit>`. A later operation
+    /// that requires class initialization still follows the normal JVM rules.
+    ///
+    /// # Errors
+    /// Returns an error if the class cannot be loaded or linked.
+    pub async fn load_and_link_class<S>(&self, class_name: S) -> Result<Arc<Class>>
+    where
+        S: AsRef<str> + Debug + Send,
+    {
+        run_local(async move {
+            let class_name = JavaStr::cow_from_str(class_name.as_ref());
+            let thread = self.primordial_thread().await?;
+            thread.load_and_link_class(&class_name).await
+        })
+        .await
+    }
+
+    /// Set a host-owned object's instance field after checking the declared field type.
+    ///
+    /// This is a trusted host operation for preparing mirrors. It can set private and final
+    /// fields. Java bytecode writes still follow normal access rules and any configured host
+    /// policy.
+    ///
+    /// # Errors
+    /// Returns an error if the object is null or from another VM, the field is missing or static,
+    /// or the value does not fit the field's type or has a class identity that cannot be checked
+    /// in this VM.
+    pub async fn set_host_object_field(
+        &self,
+        object: &Value,
+        field_name: &str,
+        value: Value,
+    ) -> Result<()> {
+        let host_class = object.as_object_ref()?.class().clone();
+        let vm_host_class = self.load_and_link_class(host_class.name()).await?;
+        if !Arc::ptr_eq(&host_class, &vm_host_class) {
+            return Err(crate::Error::ConfigurationError(format!(
+                "host object class {} does not belong to this VM",
+                host_class.name()
+            )));
+        }
+        let field = host_class.declared_field(field_name)?;
+        if field.access_flags().contains(FieldAccessFlags::STATIC) {
+            return Err(crate::Error::ConfigurationError(format!(
+                "host object field {}/{} is static",
+                host_class.name(),
+                field.name()
+            )));
+        }
+        field.check_value(&value)?;
+        self.check_host_field_value(&host_class, field.name(), field.field_type(), &value)
+            .await?;
+
+        object.as_object_mut()?.set_value(field_name, value)?;
+        Ok(())
+    }
+
+    async fn check_host_field_value(
+        &self,
+        host_class: &Arc<Class>,
+        field_name: &str,
+        field_type: &FieldType,
+        value: &Value,
+    ) -> Result<()> {
+        let Value::Object(Some(reference)) = value else {
+            return Ok(());
+        };
+        let expected_name = match field_type {
+            FieldType::Object(name) => name.to_rust_string(),
+            FieldType::Array(_) => field_type.class_name(),
+            FieldType::Base(_) => return Ok(()),
+        };
+        let expected_class = self.load_and_link_class(expected_name.clone()).await?;
+        let source_class = {
+            let value_reference = reference.read();
+            match &*value_reference {
+                Reference::Object(object) => Some(object.class().clone()),
+                Reference::Array(array) => Some(array.class.clone()),
+                _ => None,
+            }
+        };
+        let Some(source_class) = source_class else {
+            return Err(crate::Error::ConfigurationError(format!(
+                "cannot verify that this array value belongs to the VM for field {}.{}:{}",
+                host_class.name(),
+                field_name,
+                field_type.descriptor()
+            )));
+        };
+        if !class_is_assignable_by_identity(&expected_class, &source_class)? {
+            return Err(crate::Error::ConfigurationError(format!(
+                "value is not assignable to field {}.{}:{} in this VM",
+                host_class.name(),
+                field_name,
+                field_type.descriptor()
+            )));
+        }
+        Ok(())
     }
 
     /// Invoke the main method of the main class associated with the VM. The main method must have

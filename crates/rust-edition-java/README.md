@@ -18,11 +18,40 @@ with the native game.
 Java tools build the test classes; the Rust adapter runs their code. Generated sources,
 classes and JARs stay in temporary folders.
 
-Callers can also supply a `MethodExecutionPolicy` that denies class-name prefixes.
-The VM checks the method's owner and receiver before running it, including calls made by
-other Java methods. It refuses blocked class startup before marking that class as starting.
-Without a policy, the existing behavior stays unchanged. This is a method-call limit,
-not a file, network, or memory sandbox.
+Callers can also supply a `MethodExecutionPolicy` to protect selected Java classes. A policy
+blocks calls into those classes and direct reads or writes of their fields. A host can allow one
+exact method on one object, and allow exact field reads from that same object. Those rules use
+object identity, so another object of the same Java class stays blocked. Inherited methods and
+fields can be allowed only when their owner is in that object's loaded class hierarchy. The
+policy also keeps each registered object alive for as long as the policy is in use.
+
+`JavaVm::new_with_host_hooks` can replace exact Java method bodies and class initializers with Rust
+callbacks. A method callback runs instead of that Java method's body. A class initializer callback
+runs after the superclass and constant fields are ready, replaces that class's Java initializer,
+and keeps the VM's normal once-only and failure rules. Ordinary native method bindings remain
+separate.
+
+For a small host-owned mirror, `allocate_object_without_initialization` loads and links the class,
+then creates a zero-filled object without running its class initializer or constructor. The host
+can fill private or final fields with the async `set_host_object_field` call. It checks that the
+destination belongs to this VM and that the value matches the field type and class hierarchy.
+It rejects reference values when it cannot prove which VM's class created them.
+`allow_method_on_host_object` and `allow_field_read_on_host_object` then grant the exact getters
+needed for that object. Method keys use `owner.method(descriptor)`; field keys use
+`owner.field:descriptor`, with JVM names and descriptors. Java bytecode still cannot write a
+protected field.
+
+Ristretto currently keeps every Java object it creates alive until the VM closes. That includes
+exceptions and their identity rules, even after Java code stops using them. Repeated invalid input
+can therefore use more memory during a long session. These focused checks do not prove that
+long-running mod gameplay is safe.
+
+Ordinary Java actions still follow class initialization rules. For example, `new`, static field
+reads or writes, and static method calls can initialize a class. Method lookup alone does not.
+The policy checks Java method calls and direct field bytecode on every access, including cached
+calls and field references. When a policy is set, Ristretto uses the interpreter so compiled code
+cannot skip those checks. The policy does not restrict reflection or `Unsafe`; it is not a full
+Java sandbox.
 
 Ristretto's source and license are kept in `third_party/ristretto_vm` and
 `third_party/ristretto_classloader`. The local classloader copy fixes file URLs for paths with
@@ -63,10 +92,13 @@ Prepare a separate home with the required JDK modules and security configuration
 
 ```sh
 python3 tools/prepare_ristretto_java_home.py --java-home "$JAVA_HOME" \
-  --modules java.base,java.compiler,java.datatransfer,java.desktop,java.logging,java.sql,java.transaction.xa,java.xml \
+  --modules java.base,java.compiler,java.datatransfer,java.desktop,java.logging,java.prefs,java.sql,java.transaction.xa,java.xml,jdk.zipfs \
   --output "$PWD/.local/ristretto-evaluation/java25-fabric-home"
 export RUST_EDITION_JAVA25_HOME="$PWD/.local/ristretto-evaluation/java25-fabric-home"
 ```
+
+Include `jdk.zipfs` and `java.prefs` for the Fabric startup check. Fabric uses its JAR
+file system provider while it scans mods, and `java.desktop` requires `java.prefs`.
 
 Point the test at libraries from your own installation. These example paths follow the
 usual Minecraft library layout; set the client JAR path separately:
@@ -81,6 +113,8 @@ export RUST_EDITION_JAVA_FABRIC_ASM_COMMONS_JAR="$MC_LIBRARIES/org/ow2/asm/asm-c
 export RUST_EDITION_JAVA_FABRIC_ASM_TREE_JAR="$MC_LIBRARIES/org/ow2/asm/asm-tree/9.10.1/asm-tree-9.10.1.jar"
 export RUST_EDITION_JAVA_FABRIC_ASM_UTIL_JAR="$MC_LIBRARIES/org/ow2/asm/asm-util/9.10.1/asm-util-9.10.1.jar"
 export RUST_EDITION_JAVA_FABRIC_MIXIN_JAR="$MC_LIBRARIES/net/fabricmc/sponge-mixin/0.17.4+mixin.0.8.7/sponge-mixin-0.17.4+mixin.0.8.7.jar"
+export RUST_EDITION_JAVA_FABRIC_GUAVA_JAR="$MC_LIBRARIES/com/google/guava/guava/33.6.0-jre/guava-33.6.0-jre.jar"
+export RUST_EDITION_JAVA_FABRIC_FAILUREACCESS_JAR="$MC_LIBRARIES/com/google/guava/failureaccess/1.0.3/failureaccess-1.0.3.jar"
 RUST_EDITION_JAVA_FABRIC_BOOT=1 cargo test --release \
   --manifest-path crates/rust-edition-java/Cargo.toml --test fabric_boot -- --nocapture
 ```

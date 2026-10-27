@@ -38,6 +38,7 @@ pub type IntrinsicMethod = ristretto_types::IntrinsicMethod<Thread>;
 pub struct MethodRegistry {
     registry: &'static ristretto_types::IntrinsicRegistry<Thread>,
     overrides: AHashMap<String, IntrinsicMethod>,
+    host_overrides: AHashMap<String, IntrinsicMethod>,
 }
 
 impl MethodRegistry {
@@ -83,6 +84,7 @@ impl MethodRegistry {
         Ok(Self {
             registry,
             overrides,
+            host_overrides: AHashMap::default(),
         })
     }
 
@@ -93,6 +95,17 @@ impl MethodRegistry {
     ) -> Result<Self> {
         let mut registry = Self::new(version)?;
         registry.overrides.extend(overrides);
+        Ok(registry)
+    }
+
+    /// Create a registry with separate native and ordinary host method bindings.
+    pub(crate) fn with_host_overrides(
+        version: &Version,
+        native_overrides: AHashMap<String, IntrinsicMethod>,
+        host_overrides: AHashMap<String, IntrinsicMethod>,
+    ) -> Result<Self> {
+        let mut registry = Self::with_overrides(version, native_overrides)?;
+        registry.host_overrides = host_overrides;
         Ok(registry)
     }
 
@@ -151,11 +164,26 @@ impl MethodRegistry {
         method_descriptor: &str,
         is_native: bool,
     ) -> Option<&IntrinsicMethod> {
-        if is_native {
+        self.host_method(class_name, method_name, method_descriptor)
+            .or_else(|| {
+                if is_native {
             self.method(class_name, method_name, method_descriptor)
         } else {
             self.builtin_method(class_name, method_name, method_descriptor)
-        }
+                }
+            })
+    }
+
+    /// Look up a host body replacement without considering native or built-in methods.
+    pub(crate) fn host_method(
+        &self,
+        class_name: &str,
+        method_name: &str,
+        method_descriptor: &str,
+    ) -> Option<&IntrinsicMethod> {
+        lookup_method_signature(class_name, method_name, method_descriptor, |signature| {
+            self.host_overrides.get(signature)
+        })
     }
 }
 

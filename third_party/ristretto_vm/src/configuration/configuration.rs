@@ -6,7 +6,7 @@
 use super::{
     MainModule, MethodExecutionPolicy, ModuleExport, ModuleOpens, ModulePatch, ModuleRead,
 };
-use crate::IntrinsicMethod;
+use crate::{HostClassInitializer, IntrinsicMethod};
 use ahash::{AHashMap, AHashSet};
 pub use ristretto_classfile::VerifyMode;
 use ristretto_classloader::{ClassPath, ClassPathEntry};
@@ -36,6 +36,11 @@ pub struct Configuration {
     pub(super) java_home: Option<PathBuf>,
     pub(super) java_version: Option<String>,
     pub(super) native_methods: AHashMap<String, IntrinsicMethod>,
+    /// Exact Java methods replaced by host code. Kept separate from native methods so host
+    /// replacements do not change native-only registration rules.
+    pub(super) host_methods: AHashMap<String, IntrinsicMethod>,
+    /// Exact class initializers replaced by host code.
+    pub(super) host_class_initializers: AHashMap<String, HostClassInitializer>,
     /// Caller-owned state made available to native methods through their VM thread.
     pub(super) host_context: Option<HostContext>,
     pub(super) system_properties: AHashMap<String, String>,
@@ -98,6 +103,14 @@ impl Configuration {
 
     pub(crate) fn native_methods(&self) -> &AHashMap<String, IntrinsicMethod> {
         &self.native_methods
+    }
+
+    pub(crate) fn host_methods(&self) -> &AHashMap<String, IntrinsicMethod> {
+        &self.host_methods
+    }
+
+    pub(crate) fn host_class_initializer(&self, class_name: &str) -> Option<&HostClassInitializer> {
+        self.host_class_initializers.get(class_name)
     }
 
     pub(crate) fn prepend_bootstrap_class_path<P: AsRef<std::ffi::OsStr>>(&mut self, path: P) {

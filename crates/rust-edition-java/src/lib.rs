@@ -12,7 +12,9 @@ use std::sync::Arc;
 use ristretto_vm::{ConfigurationBuilder, IntrinsicMethod, VM};
 
 pub use ristretto_vm::{
-    MethodExecutionPolicy, Parameters, RustValue, SyncIntrinsicMethod, Thread, Value,
+    AsyncIntrinsicMethod, Class, HostClassInitializer as HostClassInitializerCallback,
+    HostClassInitializerFuture, MethodExecutionPolicy, Object, Parameters, Reference, RustValue,
+    SyncIntrinsicMethod, Thread, Value,
 };
 
 /// The callback result type used by Rust implementations of Java native methods.
@@ -78,9 +80,70 @@ impl NativeMethod {
     }
 }
 
+/// One Rust implementation that replaces the body of one exact Java method.
+#[derive(Clone, Debug)]
+pub struct HostMethod {
+    signature: String,
+    callback: IntrinsicMethod,
+}
+
+impl HostMethod {
+    /// Replace one exact Java method with a synchronous Rust function.
+    ///
+    /// The signature uses an internal class name, a dot, the method name, and its JVM descriptor,
+    /// such as `example/Host.answer()I`. The Java method may be ordinary or `native`.
+    #[must_use]
+    pub fn sync(signature: impl Into<String>, callback: SyncIntrinsicMethod) -> Self {
+        Self {
+            signature: signature.into(),
+            callback: IntrinsicMethod::Sync(callback),
+        }
+    }
+
+    /// Replace one exact Java method with an async Rust function.
+    #[must_use]
+    pub fn asynchronous(signature: impl Into<String>, callback: AsyncIntrinsicMethod) -> Self {
+        Self {
+            signature: signature.into(),
+            callback: IntrinsicMethod::Async(callback),
+        }
+    }
+}
+
+/// One Rust replacement for the Java `<clinit>` of an exact class.
+#[derive(Clone)]
+pub struct HostClassInitializer {
+    class_name: String,
+    callback: HostClassInitializerCallback,
+}
+
+impl HostClassInitializer {
+    /// Replace one class's Java `<clinit>` with this Rust callback.
+    ///
+    /// Use the Java internal class name, such as `example/Host`. The callback receives the live
+    /// VM thread and class so it can create Java values and fill the class's static fields.
+    #[must_use]
+    pub fn new(class_name: impl Into<String>, callback: HostClassInitializerCallback) -> Self {
+        Self {
+            class_name: class_name.into(),
+            callback,
+        }
+    }
+}
+
+impl fmt::Debug for HostClassInitializer {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("HostClassInitializer")
+            .field("class_name", &self.class_name)
+            .finish_non_exhaustive()
+    }
+}
+
 /// A Java 25 VM that can run classes from caller-supplied paths.
 pub struct JavaVm {
     vm: std::sync::Arc<VM>,
+    method_policy: Option<MethodExecutionPolicy>,
 }
 
 impl std::fmt::Debug for JavaVm {
@@ -111,7 +174,16 @@ impl JavaVm {
         class_paths: &[PathBuf],
         native_methods: impl IntoIterator<Item = NativeMethod>,
     ) -> Result<Self> {
-        Self::new_inner(java_home, class_paths, native_methods, None, None).await
+        Self::new_inner(
+            java_home,
+            class_paths,
+            native_methods,
+            std::iter::empty(),
+            std::iter::empty(),
+            None,
+            None,
+        )
+        .await
     }
 
     /// Start an interpreted Java 25 VM with caller-owned state for its native methods.
@@ -134,6 +206,8 @@ impl JavaVm {
             java_home,
             class_paths,
             native_methods,
+            std::iter::empty(),
+            std::iter::empty(),
             Some(host_context),
             None,
         )
@@ -143,10 +217,10 @@ impl JavaVm {
     /// Start an interpreted Java 25 VM with caller-owned native state and a method execution
     /// policy.
     ///
-    /// The policy can block methods owned by selected Java classes. Ristretto checks every method
-    /// call, including calls to inherited methods on instances whose runtime class is blocked.
-    /// This is a narrow host guard, not a sandbox: it does not restrict field access, reflection,
-    /// or other ways Java code may interact with its environment.
+    /// The policy blocks methods and direct field instructions on selected Java classes. A host
+    /// can allow exact methods and direct field reads on specific object identities. This is a
+    /// narrow bytecode guard, not a sandbox: it does not restrict reflection, `Unsafe`, or other
+    /// ways Java code may interact with its environment.
     ///
     /// See [`JavaVm::new`] for the Java home and class path requirements, and
     /// [`JavaVm::new_with_host_context`] for the lifetime of the native state.
@@ -162,6 +236,36 @@ impl JavaVm {
             java_home,
             class_paths,
             native_methods,
+            std::iter::empty(),
+            std::iter::empty(),
+            Some(host_context),
+            Some(method_policy),
+        )
+        .await
+    }
+
+    /// Start an interpreted Java 25 VM with native methods, exact host method replacements,
+    /// class initializer replacements, caller-owned state, and a method policy.
+    ///
+    /// Host methods run in place of the exact Java method body. Host class initializers run after
+    /// the superclass and constant fields are ready and use the VM's normal once-only initialization
+    /// and failure rules. Native method registrations keep their existing native-only behavior.
+    pub async fn new_with_host_hooks<T: Any + Send + Sync>(
+        java_home: impl AsRef<Path>,
+        class_paths: &[PathBuf],
+        native_methods: impl IntoIterator<Item = NativeMethod>,
+        host_methods: impl IntoIterator<Item = HostMethod>,
+        host_class_initializers: impl IntoIterator<Item = HostClassInitializer>,
+        host_context: Arc<T>,
+        method_policy: MethodExecutionPolicy,
+    ) -> Result<Self> {
+        let host_context: Arc<dyn Any + Send + Sync> = host_context;
+        Self::new_inner(
+            java_home,
+            class_paths,
+            native_methods,
+            host_methods,
+            host_class_initializers,
             Some(host_context),
             Some(method_policy),
         )
@@ -188,10 +292,113 @@ impl JavaVm {
         }
     }
 
+    /// Load and link a class, then create a zero-filled object without running `<clinit>` or
+    /// `<init>`.
+    ///
+    /// This is for host-owned mirrors whose fields the host fills in. Later Java actions still use
+    /// normal class initialization rules.
+    ///
+    /// # Errors
+    /// Returns an error if the class cannot be loaded, linked, or laid out.
+    pub async fn allocate_object_without_initialization(&self, class_name: &str) -> Result<Value> {
+        let class = self.vm.load_and_link_class(class_name).await?;
+        let object = Object::new(class)
+            .map_err(ristretto_vm::Error::from)
+            .map_err(Error::from)?;
+        Ok(Value::from_object(self.vm.garbage_collector(), object))
+    }
+
+    /// Set a host-owned Java object's field by name, checking its declared type and VM identity.
+    ///
+    /// This trusted host operation can set private or final fields while preparing a mirror. Java
+    /// bytecode writes remain subject to the configured method policy.
+    ///
+    /// # Errors
+    /// Returns an error if `object` is null or belongs to another VM, the field is missing, or the
+    /// value has the wrong type or its class identity cannot be checked in this VM.
+    pub async fn set_host_object_field(
+        &self,
+        object: &Value,
+        field_name: &str,
+        value: Value,
+    ) -> Result<()> {
+        self.vm
+            .set_host_object_field(object, field_name, value)
+            .await
+            .map_err(Error::from)
+    }
+
+    /// Allow one exact method signature on one object identity under this VM's policy.
+    ///
+    /// Signatures use an internal class name, a dot, the method name, and its JVM descriptor, such
+    /// as `example/Host.read()I`.
+    ///
+    /// # Errors
+    /// Returns an error if this VM has no method policy or the object or signature is invalid.
+    pub fn allow_method_on_host_object(&self, object: &Value, signature: &str) -> Result<()> {
+        let policy = self.method_policy.as_ref().ok_or_else(|| {
+            Error::Configuration("this Java VM has no host method policy".to_owned())
+        })?;
+        policy
+            .allow_method_on_host_object(object, signature)
+            .map_err(Error::from)
+    }
+
+    /// Allow one exact method on this object, including a method declared by a superclass or
+    /// interface in its loaded class hierarchy.
+    ///
+    /// This is useful for a Rust-created exception object that needs a small set of inherited
+    /// Java getters. It does not allow the same method on another object.
+    pub fn allow_inherited_method_on_host_object(
+        &self,
+        object: &Value,
+        signature: &str,
+    ) -> Result<()> {
+        let policy = self.method_policy.as_ref().ok_or_else(|| {
+            Error::Configuration("this Java VM has no host method policy".to_owned())
+        })?;
+        policy
+            .allow_inherited_method_on_host_object(object, signature)
+            .map_err(Error::from)
+    }
+
+    /// Allow one exact direct field read from one object identity under this VM's policy.
+    ///
+    /// Signatures use `owner.field:descriptor`, such as `example/Host.value:I`. This does not
+    /// allow bytecode writes or reflection access.
+    ///
+    /// # Errors
+    /// Returns an error if this VM has no method policy or the object or signature is invalid.
+    pub fn allow_field_read_on_host_object(&self, object: &Value, signature: &str) -> Result<()> {
+        let policy = self.method_policy.as_ref().ok_or_else(|| {
+            Error::Configuration("this Java VM has no host method policy".to_owned())
+        })?;
+        policy
+            .allow_field_read_on_host_object(object, signature)
+            .map_err(Error::from)
+    }
+
+    /// Allow one exact direct field read on this object, including a field declared by a
+    /// superclass in its loaded class hierarchy.
+    pub fn allow_inherited_field_read_on_host_object(
+        &self,
+        object: &Value,
+        signature: &str,
+    ) -> Result<()> {
+        let policy = self.method_policy.as_ref().ok_or_else(|| {
+            Error::Configuration("this Java VM has no host method policy".to_owned())
+        })?;
+        policy
+            .allow_inherited_field_read_on_host_object(object, signature)
+            .map_err(Error::from)
+    }
+
     async fn new_inner(
         java_home: impl AsRef<Path>,
         class_paths: &[PathBuf],
         native_methods: impl IntoIterator<Item = NativeMethod>,
+        host_methods: impl IntoIterator<Item = HostMethod>,
+        host_class_initializers: impl IntoIterator<Item = HostClassInitializer>,
         host_context: Option<Arc<dyn Any + Send + Sync>>,
         method_policy: Option<MethodExecutionPolicy>,
     ) -> Result<Self> {
@@ -219,6 +426,7 @@ impl JavaVm {
         if let Some(host_context) = host_context {
             builder = builder.host_context(host_context);
         }
+        let stored_method_policy = method_policy.clone();
         if let Some(method_policy) = method_policy {
             builder = builder.method_execution_policy(method_policy);
         }
@@ -234,6 +442,41 @@ impl JavaVm {
                 .register_native_method(&method.signature, IntrinsicMethod::Sync(method.callback));
         }
 
+        let mut host_signatures = HashSet::new();
+        for method in host_methods {
+            if method.signature.contains(".<clinit>(") {
+                return Err(Error::Configuration(format!(
+                    "class initializers must use HostClassInitializer: {}",
+                    method.signature
+                )));
+            }
+            if !host_signatures.insert(method.signature.clone()) {
+                return Err(Error::Configuration(format!(
+                    "duplicate Rust host method binding: {}",
+                    method.signature
+                )));
+            }
+            if signatures.contains(&method.signature) {
+                return Err(Error::Configuration(format!(
+                    "native and host method bindings share a signature: {}",
+                    method.signature
+                )));
+            }
+            builder = builder.register_host_method(&method.signature, method.callback);
+        }
+
+        let mut initializer_classes = HashSet::new();
+        for initializer in host_class_initializers {
+            if !initializer_classes.insert(initializer.class_name.clone()) {
+                return Err(Error::Configuration(format!(
+                    "duplicate Rust host class initializer: {}",
+                    initializer.class_name
+                )));
+            }
+            builder = builder
+                .register_host_class_initializer(&initializer.class_name, initializer.callback);
+        }
+
         let vm = VM::new(builder.build()?).await?;
         if vm.java_major_version() != 25 {
             return Err(Error::Configuration(format!(
@@ -241,7 +484,10 @@ impl JavaVm {
                 vm.java_version()
             )));
         }
-        Ok(Self { vm })
+        Ok(Self {
+            vm,
+            method_policy: stored_method_policy,
+        })
     }
 
     /// The Java version read by Ristretto from the prepared library home.

@@ -107,3 +107,21 @@ pub use ristretto_classloader::{
 pub use ristretto_types::{Error, JavaError, Parameters, Result, RustValue};
 pub use thread::Thread;
 pub use vm::VM;
+
+/// A host replacement for one exact Java class initializer.
+///
+/// The VM calls this after the superclass and `ConstantValue` fields are ready. The host callback
+/// replaces that class's Java `<clinit>` method and shares the VM's normal success and failure
+/// tracking.
+pub type HostClassInitializer = std::sync::Arc<
+    dyn Fn(
+            std::sync::Arc<Thread>,
+            std::sync::Arc<Class>,
+        ) -> ristretto_types::BoxFuture<'static, Result<()>>
+        + Send
+        + Sync,
+>;
+
+/// The future returned by a [`HostClassInitializer`] callback.
+pub type HostClassInitializerFuture =
+    ristretto_types::BoxFuture<'static, Result<()>>;

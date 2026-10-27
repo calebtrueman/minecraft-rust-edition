@@ -9,7 +9,7 @@ use super::{
     MethodExecutionPolicy, ModuleExport, ModuleOpens, ModulePatch, ModuleRead, VerifyMode,
 };
 use crate::Error::InternalError;
-use crate::{IntrinsicMethod, Result};
+use crate::{HostClassInitializer, IntrinsicMethod, Result};
 use ahash::{AHashMap, AHashSet};
 use ristretto_classloader::{ClassPath, DEFAULT_JAVA_VERSION};
 use ristretto_gc::GarbageCollector;
@@ -45,6 +45,8 @@ pub struct ConfigurationBuilder {
     java_home: Option<PathBuf>,
     java_version: Option<String>,
     native_methods: AHashMap<String, IntrinsicMethod>,
+    host_methods: AHashMap<String, IntrinsicMethod>,
+    host_class_initializers: AHashMap<String, HostClassInitializer>,
     host_context: Option<HostContext>,
     system_properties: AHashMap<String, String>,
     interpreted: bool,
@@ -96,6 +98,8 @@ impl ConfigurationBuilder {
             java_home: None,
             java_version: None,
             native_methods: AHashMap::default(),
+            host_methods: AHashMap::default(),
+            host_class_initializers: AHashMap::default(),
             host_context: None,
             system_properties: AHashMap::default(),
             interpreted: false,
@@ -170,6 +174,32 @@ impl ConfigurationBuilder {
     ) -> Self {
         self.native_methods
             .insert(signature.as_ref().to_string(), method);
+        self
+    }
+
+    /// Register host code that replaces one exact Java method, whether or not the Java method is
+    /// marked `native`. This registry is separate from native methods and is selected before the
+    /// Java method body runs.
+    #[must_use]
+    pub fn register_host_method<S: AsRef<str>>(
+        mut self,
+        signature: S,
+        method: IntrinsicMethod,
+    ) -> Self {
+        self.host_methods
+            .insert(signature.as_ref().to_string(), method);
+        self
+    }
+
+    /// Register host code to replace one exact class's `<clinit>` method.
+    #[must_use]
+    pub fn register_host_class_initializer<S: AsRef<str>>(
+        mut self,
+        class_name: S,
+        initializer: HostClassInitializer,
+    ) -> Self {
+        self.host_class_initializers
+            .insert(class_name.as_ref().to_string(), initializer);
         self
     }
 
@@ -438,6 +468,8 @@ impl ConfigurationBuilder {
             java_home,
             java_version,
             native_methods: self.native_methods,
+            host_methods: self.host_methods,
+            host_class_initializers: self.host_class_initializers,
             host_context: self.host_context,
             system_properties: {
                 #[cfg_attr(not(target_family = "wasm"), expect(unused_mut))]
@@ -486,6 +518,7 @@ impl Debug for ConfigurationBuilder {
             .field("java_home", &self.java_home)
             .field("java_version", &self.java_version)
             .field("native_methods", &self.native_methods)
+            .field("host_methods", &self.host_methods)
             .field("has_host_context", &self.host_context.is_some())
             .field("system_properties", &self.system_properties)
             .field("interpreted", &self.interpreted)

@@ -53,6 +53,9 @@ impl ReceiverChecks {
 
 #[derive(Debug)]
 pub(crate) struct ResolvedFieldRef {
+    /// The class named by the symbolic field reference. This can differ from the declaration
+    /// owner when a field is inherited.
+    pub(crate) referenced_class: Arc<Class>,
     pub(crate) declaring_class: Arc<Class>,
     field: Arc<Field>,
     storage: FieldStorage,
@@ -62,6 +65,15 @@ pub(crate) struct ResolvedFieldRef {
 }
 
 impl ResolvedFieldRef {
+    pub(crate) fn signature(&self) -> String {
+        format!(
+            "{}.{}:{}",
+            self.declaring_class.name(),
+            self.field.name(),
+            self.field.field_type().descriptor()
+        )
+    }
+
     pub(crate) fn is_static(&self) -> bool {
         matches!(self.storage, FieldStorage::Static(_))
     }
@@ -254,6 +266,7 @@ pub(crate) async fn resolve_field_ref(frame: &Frame, index: u16) -> Result<Arc<R
         FieldStorage::Instance(slot)
     };
     let resolved = Arc::new(ResolvedFieldRef {
+        referenced_class: target,
         declaring_class,
         field,
         storage,

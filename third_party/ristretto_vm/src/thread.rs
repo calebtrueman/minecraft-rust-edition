@@ -1050,10 +1050,16 @@ impl Thread {
         use crate::JavaError::{ExceptionInInitializerError, NoClassDefFoundError};
         use ristretto_classloader::InitializationAction;
 
+        let host_initializer = self
+            .vm()?
+            .configuration()
+            .host_class_initializer(class.name())
+            .cloned();
         if !class.is_initialized()?
-            && class.class_initializer().is_some()
+            && (class.class_initializer().is_some() || host_initializer.is_some())
             && let Some(policy) = self.vm()?.configuration().method_execution_policy()
             && policy.blocked_class(class.name(), None).is_some()
+            && host_initializer.is_none()
         {
             return Err(UnsupportedOperationException(format!(
                 "Java class initializer {}.<clinit>()V is blocked by the host method policy",
@@ -1107,44 +1113,53 @@ impl Thread {
                         return Err(error);
                     }
 
-                    // Step 7: Execute <clinit> for this class
-                    if let Some(class_initializer) = class.class_initializer() {
-                        match self
-                            .execute(class, &class_initializer, &[] as &[Value])
-                            .await
-                        {
-                            Ok(_) => {
-                                // Step 9: Mark as initialized
-                                class.complete_initialization()?;
-                            }
-                            Err(error) => {
-                                // Step 8: <clinit> threw, mark as Erroneous
-                                let error_msg = format!("{error:#}");
-                                class.fail_initialization(error_msg.clone())?;
-                                if let crate::Error::Throwable(ref cause) = error {
-                                    use crate::assignable::Assignable;
-                                    let cause_class = cause.as_object_ref()?.class().clone();
-                                    let error_class = self.class("java/lang/Error").await?;
-                                    // JVMS 5.5: Error subclasses propagate unchanged. Other
-                                    // throwables retain their cause in the initialization error.
-                                    if error_class.is_assignable_from(self, &cause_class).await? {
-                                        return Err(error);
-                                    }
-                                    let wrapped = self
-                                        .object(
-                                            "java/lang/ExceptionInInitializerError",
-                                            "Ljava/lang/Throwable;",
-                                            std::slice::from_ref(cause),
-                                        )
-                                        .await?;
-                                    return Err(crate::Error::Throwable(wrapped));
-                                }
-                                return Err(ExceptionInInitializerError(error_msg).into());
-                            }
+                    // Step 7: Run the host replacement, or the Java <clinit> if there is no
+                    // replacement. A registered host initializer also runs for classes without a
+                    // Java <clinit>, so a misspelled or absent initializer body cannot silently
+                    // skip required host setup.
+                    let result = if let Some(host_initializer) = &host_initializer {
+                        match self.thread.upgrade() {
+                            Some(thread) => host_initializer(thread, class.clone()).await,
+                            None => Err(InternalError(
+                                "Call stack is not available".to_string(),
+                            )),
                         }
+                    } else if let Some(class_initializer) = class.class_initializer() {
+                        self.execute(class, &class_initializer, &[] as &[Value])
+                            .await
+                            .map(|_| ())
                     } else {
-                        // No <clinit>, just mark as initialized
-                        class.complete_initialization()?;
+                        Ok(())
+                    };
+                    match result {
+                        Ok(()) => {
+                            // Step 9: Mark as initialized
+                            class.complete_initialization()?;
+                        }
+                        Err(error) => {
+                            // Step 8: <clinit> threw, mark as Erroneous
+                            let error_msg = format!("{error:#}");
+                            class.fail_initialization(error_msg.clone())?;
+                            if let crate::Error::Throwable(ref cause) = error {
+                                use crate::assignable::Assignable;
+                                let cause_class = cause.as_object_ref()?.class().clone();
+                                let error_class = self.class("java/lang/Error").await?;
+                                // JVMS 5.5: Error subclasses propagate unchanged. Other
+                                // throwables retain their cause in the initialization error.
+                                if error_class.is_assignable_from(self, &cause_class).await? {
+                                    return Err(error);
+                                }
+                                let wrapped = self
+                                    .object(
+                                        "java/lang/ExceptionInInitializerError",
+                                        "Ljava/lang/Throwable;",
+                                        std::slice::from_ref(cause),
+                                    )
+                                    .await?;
+                                return Err(crate::Error::Throwable(wrapped));
+                            }
+                            return Err(ExceptionInInitializerError(error_msg).into());
+                        }
                     }
 
                     return Ok(());
@@ -1371,6 +1386,10 @@ impl Thread {
         let method_name = method.name();
         let method_descriptor = method.descriptor();
         let vm = self.vm()?;
+        let method_registry = vm.method_registry();
+        let host_override = method_registry
+            .host_method(class_name, method_name, method_descriptor)
+            .is_some();
 
         if let Some(policy) = vm.configuration().method_execution_policy() {
             let receiver_class_name = if method.is_static() {
@@ -1384,10 +1403,20 @@ impl Thread {
             if let Some(blocked_class_name) =
                 policy.blocked_class(class_name, receiver_class_name.as_deref())
             {
-                return Err(UnsupportedOperationException(format!(
-                    "Java method {class_name}.{method_name}{method_descriptor} is blocked by the host policy for class {blocked_class_name}"
-                ))
-                .into());
+                let receiver = (!method.is_static())
+                    .then(|| parameters.as_slice(caller.as_deref()))
+                    .transpose()?
+                    .and_then(|parameters| parameters.first());
+                let signature = format!("{class_name}.{method_name}{method_descriptor}");
+                let allowed = receiver.is_some_and(|receiver| {
+                    policy.method_allowed_on_host_object(receiver, &signature)
+                });
+                if !allowed && !host_override {
+                    return Err(UnsupportedOperationException(format!(
+                        "Java method {signature} is blocked by the host policy for class {blocked_class_name}"
+                    ))
+                    .into());
+                }
             }
         }
 
@@ -1396,7 +1425,6 @@ impl Thread {
             .await?;
         let monitor_guard = MonitorGuard::new(sync_monitor, self.id);
 
-        let method_registry = vm.method_registry();
         let rust_method = match intrinsic {
             crate::frame::IntrinsicBinding::Resolved(method) => method,
             crate::frame::IntrinsicBinding::Unresolved => method_registry

@@ -13,7 +13,7 @@ The separate `rust-edition-java` crate wraps patched Ristretto VM 0.34. The call
 
 Ristretto 0.34 prefers a JDK's `lib/modules` image when that image and `jmods` are both present. In this adapter, that path fails to load `java.lang.ThreadGroup`. The helper `tools/prepare_ristretto_java_home.py` makes an ignored scratch home with `release`, `jmods/java.base.jmod`, and the JDK's `lib/tzdb.dat` time-zone file. It copies `java.base.jmod` from a normal JDK, or extracts `java.base` with `jimage` and rebuilds it with `jmod` when the JDK has no JMODs. This small library home is enough for the adapter fixtures. It is not enough to run Fabric mods.
 
-Further Java 25 comparisons check file URLs for class folders and JARs whose paths contain spaces, Unicode, `#` and `%`. A separate check verifies text normalization, the `java.base` module name, and denial of access to a private Java resource. These checks use original test classes. The JMOD module fix currently maps only `java.base`; it does not map every Java module.
+Further Java 25 comparisons check file URLs for class folders and JARs whose paths contain spaces, Unicode, `#` and `%`. A separate check verifies text normalization, the `java.base` module name, and denial of access to a private Java resource. These checks use original test classes. The runtime now reads module information from the JMODs in the prepared home, including their service providers and dependencies.
 
 Native callbacks can also use caller-owned Rust state. A two-VM test checks that their counters
 stay separate and that dropping the adapter releases its state. Dropping the adapter does not
@@ -22,7 +22,15 @@ parents, existing files, and linked folders on Unix hosts.
 
 A small original JAR also checks Java's service lookup: `ServiceLoader` finds its declared
 provider and `Provider.get()` creates it. The result matches Java 25 with only `java.base`
-enabled. Services supplied by other JDK modules are outside this small test home's scope.
+enabled. A second comparison uses a larger home with `jdk.zipfs`: Java's service lookup finds
+the ZIP provider, creates an archive, writes and reads a file, then closes and reopens it.
+The preparation tool checks module dependencies so an incomplete home fails before use.
+
+Another Java 25 comparison checks that looking up an instance method does not start its
+class, while calling an inherited static method starts its declaring class. A 29-case
+comparison checks plain reads of numbers from byte arrays, including byte order, unaligned
+reads, floating-point bit patterns, and out-of-range errors. This does not cover the other
+VarHandle operations.
 
 A Java 25 comparison also covers reference updates made while a class is starting up.
 The patched runtime writes to the class's static field, checks object identity, and holds
