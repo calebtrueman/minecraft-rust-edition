@@ -663,16 +663,26 @@ impl Game<'_> {
         content: horizon_client::text::Text,
         source: horizon_client::chat::ChatSource,
     ) {
+        self.chat_line_from(content, source, None);
+    }
+    /// A connection chat line that may carry the sender from PlayerChat.
+    pub(super) fn chat_line_from(
+        &mut self,
+        content: horizon_client::text::Text,
+        source: horizon_client::chat::ChatSource,
+        sender: Option<u128>,
+    ) {
         if !self.ui.chat.shows(source) {
             return;
         }
         let text = content.plain();
         log::info!("[chat] {text}");
-        self.ui.chat.add(
+        self.ui.chat.add_with_sender(
             &self.gui.atlas,
             content,
             None,
             source,
+            sender,
             self.ticks,
             self.screen == Screen::Chat,
         );
@@ -2442,7 +2452,11 @@ impl Game<'_> {
                     .as_ref()
                     .map_or_else(|| serde_json::Value::from(p.content.as_str()), tag_to_json);
                 let line = self.format_chat(&p.chat_type, content);
-                self.chat_line(line, horizon_client::chat::ChatSource::Player);
+                self.chat_line_from(
+                    line,
+                    horizon_client::chat::ChatSource::Player,
+                    Some(p.sender),
+                );
             }
             C::DisguisedChat(p) => {
                 let content = horizon_client::scoreboard::tag_to_json(&p.message);

@@ -27,16 +27,100 @@ fn font() -> Font {
 }
 
 fn add(chat: &mut Chat, font: &Font, content: Text) {
-    for content in font.wrap_components(&content, chat.max_width()) {
-        chat.lines.insert(
-            0,
-            Line {
-                added: 0,
-                content,
-                indicator: None,
-            },
-        );
-    }
+    chat.add_message(font, content, None, ChatSource::Client, 0, false);
+}
+
+fn lines_for_message(chat: &Chat, message_id: u64) -> Vec<&Line> {
+    chat.lines
+        .iter()
+        .filter(|line| line.message_id == message_id)
+        .collect()
+}
+
+#[test]
+fn player_sender_and_message_boundary_survive_wrap_scroll_and_reflow() {
+    let font = font();
+    let mut chat = Chat::default();
+    chat.options.width = 0.0;
+    chat.options.height_focused = 0.0;
+    let sender = 0x0123_4567_89ab_cdef_0123_4567_89ab_cdef;
+    let content = Text::literal("word ".repeat(40));
+    chat.add_message_with_sender(
+        &font,
+        content,
+        None,
+        ChatSource::Player,
+        Some(sender),
+        7,
+        false,
+    );
+
+    let message_id = chat.messages[0].id;
+    let before = lines_for_message(&chat, message_id);
+    assert!(before.len() > 2, "the message should wrap");
+    assert!(before.iter().all(|line| line.sender == Some(sender)));
+    assert_eq!(
+        before.iter().filter(|line| line.end_of_entry).count(),
+        1,
+        "exactly one wrapped line marks the end of the message"
+    );
+
+    chat.add_message(
+        &font,
+        Text::literal("server notice"),
+        None,
+        ChatSource::Server,
+        8,
+        false,
+    );
+    let server = &chat.messages[0];
+    assert_ne!(server.id, message_id);
+    assert_eq!(server.sender, None);
+    assert!(
+        chat.lines
+            .iter()
+            .filter(|line| line.message_id == server.id)
+            .all(|line| line.sender == None)
+    );
+
+    chat.scroll_by(3, true);
+    assert!(chat.scroll > 0, "the focused history should scroll");
+    let visible_start = chat.scroll;
+    let visible_end = visible_start + chat.lines_per_page(true);
+    assert!(
+        chat.lines[visible_start..visible_end.min(chat.lines.len())]
+            .iter()
+            .any(|line| line.message_id == message_id && line.sender == Some(sender))
+    );
+    assert!(!chat.layout(180, 8, true).is_empty());
+    assert!(
+        lines_for_message(&chat, message_id)
+            .iter()
+            .all(|line| line.sender == Some(sender))
+    );
+
+    let old_line_count = lines_for_message(&chat, message_id).len();
+    chat.options.width = 0.5;
+    chat.rewrap(&font);
+    let after = lines_for_message(&chat, message_id);
+    assert_eq!(
+        chat.messages
+            .iter()
+            .find(|m| m.id == message_id)
+            .unwrap()
+            .sender,
+        Some(sender)
+    );
+    assert!(
+        after.len() < old_line_count,
+        "the wider chat should wrap to fewer lines"
+    );
+    assert!(after.iter().all(|line| line.sender == Some(sender)));
+    assert_eq!(
+        after.iter().filter(|line| line.end_of_entry).count(),
+        1,
+        "reflow keeps exactly one end-of-message line"
+    );
 }
 
 #[test]

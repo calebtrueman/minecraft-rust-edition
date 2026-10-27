@@ -154,17 +154,29 @@ impl ChatOptions {
 }
 #[derive(Clone, Debug)]
 struct Message {
+    /// Stable while this message is kept and its wrapped lines are rebuilt.
+    id: u64,
     added: u64,
     content: Text,
     indicator: Option<u32>,
     source: ChatSource,
+    /// The UUID from a PlayerChat packet; local and system messages have none.
+    sender: Option<u128>,
 }
 /// A wrapped line (`GuiMessage.Line`).
 #[derive(Clone, Debug)]
 struct Line {
+    /// The message this line came from. All wrapped lines share this ID.
+    #[allow(dead_code)]
+    message_id: u64,
     added: u64,
     content: Text,
     indicator: Option<u32>,
+    #[allow(dead_code)]
+    sender: Option<u128>,
+    /// True for the last line returned by wrapping, like `GuiMessage.Line`.
+    #[allow(dead_code)]
+    end_of_entry: bool,
 }
 
 /// `ChatComponent.AlphaCalculator.timeBased`: opaque for 180 ticks, then
@@ -194,6 +206,8 @@ pub struct Chat {
     pub received: u64,
     /// The Chat option's `visibleMessageFilter` (`set_abilities`).
     abilities: ChatAbilities,
+    /// ID for the next message. Rewrapping keeps the IDs already assigned.
+    next_message_id: u64,
 }
 impl Chat {
     pub fn lines_per_page(&self, focused: bool) -> usize {
@@ -216,12 +230,46 @@ impl Chat {
     ) {
         self.add_message(&atlas.font, content, indicator, source, ticks, focused);
     }
+    /// Adds a chat line with its optional network sender UUID. System and
+    /// local lines pass `None`; PlayerChat packets pass their sender.
+    pub fn add_with_sender(
+        &mut self,
+        atlas: &HudAtlas,
+        content: Text,
+        indicator: Option<u32>,
+        source: ChatSource,
+        sender: Option<u128>,
+        ticks: u64,
+        focused: bool,
+    ) {
+        self.add_message_with_sender(
+            &atlas.font,
+            content,
+            indicator,
+            source,
+            sender,
+            ticks,
+            focused,
+        );
+    }
     fn add_message(
         &mut self,
         font: &crate::font::Font,
         content: Text,
         indicator: Option<u32>,
         source: ChatSource,
+        ticks: u64,
+        focused: bool,
+    ) {
+        self.add_message_with_sender(font, content, indicator, source, None, ticks, focused);
+    }
+    fn add_message_with_sender(
+        &mut self,
+        font: &crate::font::Font,
+        content: Text,
+        indicator: Option<u32>,
+        source: ChatSource,
+        sender: Option<u128>,
         ticks: u64,
         focused: bool,
     ) {
@@ -234,11 +282,14 @@ impl Chat {
             println!("[CHAT] {}", content.plain());
         }
         let message = Message {
+            id: self.next_message_id,
             added: ticks,
             content,
             indicator,
             source,
+            sender,
         };
+        self.next_message_id = self.next_message_id.wrapping_add(1);
         self.add_lines(font, &message, focused);
         self.messages.insert(0, message);
         self.messages.truncate(100);
@@ -247,7 +298,9 @@ impl Chat {
     fn add_lines(&mut self, font: &crate::font::Font, message: &Message, focused: bool) {
         let width = self.max_width();
         let content = self.displayed(&message.content);
-        for line in font.wrap_components(&content, width) {
+        let wrapped = font.wrap_components(&content, width);
+        let line_count = wrapped.len();
+        for (index, line) in wrapped.into_iter().enumerate() {
             if focused && self.scroll > 0 {
                 self.new_since_scroll = true;
                 self.scroll_by(1, focused);
@@ -255,9 +308,12 @@ impl Chat {
             self.lines.insert(
                 0,
                 Line {
+                    message_id: message.id,
                     added: message.added,
                     content: line,
                     indicator: message.indicator,
+                    sender: message.sender,
+                    end_of_entry: index + 1 == line_count,
                 },
             );
         }
