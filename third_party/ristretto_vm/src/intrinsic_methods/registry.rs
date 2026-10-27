@@ -67,6 +67,12 @@ impl MethodRegistry {
                 IntrinsicMethod::Async(super::reference_cas::compare_and_set_reference),
             );
         }
+        if version.major() >= 55 {
+            overrides.insert(
+                "java/lang/invoke/VarHandle.get([Ljava/lang/Object;)Ljava/lang/Object;".to_string(),
+                IntrinsicMethod::Async(super::varhandle::get),
+            );
+        }
         #[cfg(target_family = "unix")]
         if version.major() >= 65 {
             overrides.insert(

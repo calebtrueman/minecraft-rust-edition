@@ -14,6 +14,8 @@ mod registry;
 /// Corrects the Java 21+ Unix `access0` return value.
 #[cfg(target_family = "unix")]
 mod unix_access;
+/// Temporary diagnostics and compatibility handling for Java 25 VarHandle wrappers.
+mod varhandle;
 
 /// Re-export the `MethodRegistry` for use by other modules in the VM
 pub use registry::{AsyncIntrinsicMethod, IntrinsicMethod, MethodRegistry, SyncIntrinsicMethod};
