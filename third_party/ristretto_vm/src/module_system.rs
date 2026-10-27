@@ -30,7 +30,7 @@ use ristretto_classloader::module::{
 };
 use ristretto_gc::sync::RwLock;
 use ristretto_types::ModuleAccess;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
@@ -73,75 +73,118 @@ fn resolved_configuration_cell(jimage_path: &Path) -> Arc<ResolvedConfigurationC
     )
 }
 
-/// Reads the `java.base` descriptor from a JMOD-only Java home.
+/// Reads system module descriptors from a JMOD-only Java home.
 ///
-/// Small runtime images sometimes contain `jmods/java.base.jmod` instead of `lib/modules`.
-/// Ristretto's class loader can already read classes and resources from that JMOD, but module
-/// lookup also needs its descriptor to map packages to `java.base`.
+/// Small runtime images sometimes contain JMODs instead of `lib/modules`. Ristretto's class loader
+/// can already read classes and resources from those JMODs, but module lookup also needs their
+/// descriptors to map packages and bind service providers.
 #[derive(Debug)]
-struct JmodJavaBaseFinder {
-    reference: ModuleReference,
+struct JmodSystemFinder {
+    modules: BTreeMap<String, ModuleReference>,
 }
 
-impl JmodJavaBaseFinder {
-    /// Loads `classes/module-info.class` from `jmods/java.base.jmod` when it exists.
+impl JmodSystemFinder {
+    /// Loads `classes/module-info.class` from every JMOD when the directory exists.
     fn new(java_home: &Path) -> std::result::Result<Option<Self>, String> {
         const MAX_DESCRIPTOR_BYTES: u64 = 1024 * 1024;
 
-        let jmod_path = java_home.join("jmods").join("java.base.jmod");
-        if !jmod_path.is_file() {
+        let jmods_path = java_home.join("jmods");
+        if !jmods_path.is_dir() {
             return Ok(None);
         }
 
-        let file = std::fs::File::open(&jmod_path)
-            .map_err(|error| format!("{}: {error}", jmod_path.display()))?;
-        let mut archive =
-            ZipArchive::new(file).map_err(|error| format!("{}: {error}", jmod_path.display()))?;
-        let module_info = archive
-            .by_name("classes/module-info.class")
-            .map_err(|error| format!("{}: {error}", jmod_path.display()))?;
-        if module_info.size() > MAX_DESCRIPTOR_BYTES {
-            return Err(format!(
-                "{} has a module descriptor larger than {MAX_DESCRIPTOR_BYTES} bytes",
-                jmod_path.display()
-            ));
+        let entries = std::fs::read_dir(&jmods_path)
+            .map_err(|error| format!("{}: {error}", jmods_path.display()))?;
+        let mut jmod_paths = Vec::new();
+        for entry in entries {
+            let path = entry
+                .map_err(|error| format!("{}: {error}", jmods_path.display()))?
+                .path();
+            if path
+                .extension()
+                .is_some_and(|extension| extension == "jmod")
+            {
+                jmod_paths.push(path);
+            }
         }
-        let mut bytes = Vec::new();
-        module_info
-            .take(MAX_DESCRIPTOR_BYTES + 1)
-            .read_to_end(&mut bytes)
-            .map_err(|error| format!("{}: {error}", jmod_path.display()))?;
-        if bytes.len() as u64 > MAX_DESCRIPTOR_BYTES {
+        jmod_paths.sort();
+
+        let mut modules = BTreeMap::new();
+        for jmod_path in jmod_paths {
+            let file = std::fs::File::open(&jmod_path)
+                .map_err(|error| format!("{}: {error}", jmod_path.display()))?;
+            let mut archive = ZipArchive::new(file)
+                .map_err(|error| format!("{}: {error}", jmod_path.display()))?;
+            let module_info = archive
+                .by_name("classes/module-info.class")
+                .map_err(|error| format!("{}: {error}", jmod_path.display()))?;
+            if module_info.size() > MAX_DESCRIPTOR_BYTES {
+                return Err(format!(
+                    "{} has a module descriptor larger than {MAX_DESCRIPTOR_BYTES} bytes",
+                    jmod_path.display()
+                ));
+            }
+            let mut bytes = Vec::new();
+            module_info
+                .take(MAX_DESCRIPTOR_BYTES + 1)
+                .read_to_end(&mut bytes)
+                .map_err(|error| format!("{}: {error}", jmod_path.display()))?;
+            if bytes.len() as u64 > MAX_DESCRIPTOR_BYTES {
+                return Err(format!(
+                    "{} has a module descriptor larger than {MAX_DESCRIPTOR_BYTES} bytes",
+                    jmod_path.display()
+                ));
+            }
+
+            let class_file = ClassFile::from_bytes(&bytes).map_err(|error| {
+                format!(
+                    "{}: invalid module descriptor: {error}",
+                    jmod_path.display()
+                )
+            })?;
+            let descriptor = ModuleDescriptor::from_class_file(&class_file).map_err(|error| {
+                format!(
+                    "{}: invalid module descriptor: {error}",
+                    jmod_path.display()
+                )
+            })?;
+            let expected_name = jmod_path
+                .file_stem()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| format!("{} has no valid module name", jmod_path.display()))?;
+            if descriptor.name != expected_name {
+                return Err(format!(
+                    "{} describes {}, expected {expected_name}",
+                    jmod_path.display(),
+                    descriptor.name
+                ));
+            }
+            let module_name = descriptor.name.clone();
+            let reference =
+                ModuleReference::new(descriptor, ModuleSource::System, Some(jmod_path.clone()));
+            if modules.insert(module_name.clone(), reference).is_some() {
+                return Err(format!("duplicate JMOD module {module_name}"));
+            }
+        }
+
+        if !modules.contains_key(JAVA_BASE_MODULE) {
             return Err(format!(
-                "{} has a module descriptor larger than {MAX_DESCRIPTOR_BYTES} bytes",
-                jmod_path.display()
+                "{} does not contain {JAVA_BASE_MODULE}.jmod",
+                jmods_path.display()
             ));
         }
 
-        let class_file = ClassFile::from_bytes(&bytes).map_err(|error| error.to_string())?;
-        let descriptor =
-            ModuleDescriptor::from_class_file(&class_file).map_err(|error| error.to_string())?;
-        if descriptor.name != JAVA_BASE_MODULE {
-            return Err(format!(
-                "{} describes {}, expected {JAVA_BASE_MODULE}",
-                jmod_path.display(),
-                descriptor.name
-            ));
-        }
-
-        Ok(Some(Self {
-            reference: ModuleReference::new(descriptor, ModuleSource::System, Some(jmod_path)),
-        }))
+        Ok(Some(Self { modules }))
     }
 }
 
-impl ModuleFinder for JmodJavaBaseFinder {
+impl ModuleFinder for JmodSystemFinder {
     fn find(&self, name: &str) -> Option<ModuleReference> {
-        (name == JAVA_BASE_MODULE).then(|| self.reference.clone())
+        self.modules.get(name).cloned()
     }
 
     fn find_all(&self) -> Vec<ModuleReference> {
-        vec![self.reference.clone()]
+        self.modules.values().cloned().collect()
     }
 }
 
@@ -447,23 +490,23 @@ impl ModuleSystem {
             debug!("No jimage found at {}", jimage_path.display());
         }
 
-        // Some small Java homes ship the boot classes as JMOD files and leave out the
-        // combined runtime image. java.base is enough to map the boot loader's packages,
-        // including resources used by ICU, without trying to resolve optional modules
-        // that may not be present in this trimmed home.
-        match JmodJavaBaseFinder::new(java_home) {
+        // Some small Java homes ship boot classes as JMOD files and leave out the combined runtime
+        // image. Read every supplied descriptor so package lookup and service binding can see
+        // modules such as jdk.zipfs when they are present.
+        match JmodSystemFinder::new(java_home) {
             Ok(Some(jmod_finder)) => {
                 warn!(
-                    "Loaded only java.base from JMODs in {}; other supplied Java modules are not mapped yet",
-                    java_home.display()
+                    "Loaded {} system modules from JMODs in {}",
+                    jmod_finder.find_all().len(),
+                    java_home.display(),
                 );
                 finder_chain.add(Box::new(jmod_finder));
             }
             Ok(None) => {
-                debug!("No java.base.jmod found in {}", java_home.display());
+                debug!("No JMOD directory found in {}", java_home.display());
             }
             Err(error) => {
-                debug!("Failed to load java.base module descriptor from JMOD: {error}");
+                debug!("Failed to load system module descriptors from JMODs: {error}");
             }
         }
     }
@@ -640,12 +683,7 @@ impl ModuleSystem {
                 acc
             });
 
-        ResolvedConfiguration::new(
-            std::collections::BTreeMap::new(),
-            AHashMap::default(),
-            add_exports,
-            add_opens,
-        )
+        ResolvedConfiguration::new(BTreeMap::new(), AHashMap::default(), add_exports, add_opens)
     }
 
     /// Checks if access from one module to a class in another module is allowed.
@@ -1356,6 +1394,26 @@ mod tests {
                 .find_module_for_package("jdk/internal/icu/impl"),
             Some(JAVA_BASE_MODULE)
         );
+
+        if java_home.join("jmods/jdk.zipfs.jmod").is_file() {
+            let zipfs = module_system
+                .resolved_configuration()
+                .modules()
+                .find(|module| module.name() == "jdk.zipfs")
+                .expect("the supplied zip file system module should be resolved");
+            assert_eq!(
+                module_system
+                    .resolved_configuration()
+                    .find_module_for_package("jdk/nio/zipfs"),
+                Some("jdk.zipfs")
+            );
+            assert!(zipfs.descriptor().provides.iter().any(|provides| {
+                provides.service == "java/nio/file/spi/FileSystemProvider"
+                    && provides.implementations.iter().any(|implementation| {
+                        implementation == "jdk/nio/zipfs/ZipFileSystemProvider"
+                    })
+            }));
+        }
     }
 
     #[test]

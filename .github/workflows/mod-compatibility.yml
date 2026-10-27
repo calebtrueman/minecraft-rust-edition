@@ -12,6 +12,7 @@ on:
       - 'third_party/ristretto_vm/**'
       - 'third_party/ristretto_classloader/**'
       - 'tools/prepare_ristretto_java_home.py'
+      - 'tests/test_prepare_ristretto_java_home.py'
       - '.github/workflows/mod-compatibility.yml'
   pull_request:
     paths:
@@ -23,6 +24,7 @@ on:
       - 'third_party/ristretto_vm/**'
       - 'third_party/ristretto_classloader/**'
       - 'tools/prepare_ristretto_java_home.py'
+      - 'tests/test_prepare_ristretto_java_home.py'
       - '.github/workflows/mod-compatibility.yml'
   workflow_dispatch:
   workflow_call:
@@ -75,8 +77,18 @@ jobs:
           shared-key: rust-edition-java
       - name: Prepare local Java library files
         run: python3 tools/prepare_ristretto_java_home.py --java-home "$JAVA_HOME"
+      - run: python3 -m unittest tests.test_prepare_ristretto_java_home
       - run: cargo fmt --manifest-path crates/rust-edition-java/Cargo.toml --all -- --check
       - run: cargo test --release --manifest-path crates/rust-edition-java/Cargo.toml --locked
+      - name: Prepare Java ZIP file support
+        run: >-
+          python3 tools/prepare_ristretto_java_home.py --java-home "$JAVA_HOME"
+          --modules java.base,jdk.zipfs
+          --output "$GITHUB_WORKSPACE/.local/ristretto-evaluation/java25-zipfs-home"
+      - name: Compare Java module service loading with Java 25
+        env:
+          RUST_EDITION_JAVA25_HOME: ${{ github.workspace }}/.local/ristretto-evaluation/java25-zipfs-home
+        run: cargo test --release --manifest-path crates/rust-edition-java/Cargo.toml --locked --test jmod_service_provider
       - run: cargo clippy --release --manifest-path crates/rust-edition-java/Cargo.toml --locked --all-targets -- -D warnings
       - run: cargo fmt --manifest-path crates/rust-edition-fabric-host/Cargo.toml --all -- --check
       - run: cargo test --release --manifest-path crates/rust-edition-fabric-host/Cargo.toml --locked

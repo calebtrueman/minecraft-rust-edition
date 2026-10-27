@@ -121,6 +121,20 @@ def jmod_module_name(jmod: Path, jmod_file: Path) -> str:
     return first_line.partition("@")[0]
 
 
+def required_modules(description: str) -> set[str]:
+    """Read required runtime dependencies from `jmod describe`, excluding static ones."""
+    required = set()
+    for line in description.splitlines():
+        parts = line.split()
+        if not parts or parts[0] != "requires":
+            continue
+        if len(parts) < 2 or MODULE_NAME.fullmatch(parts[1]) is None:
+            raise RuntimeError(f"invalid module dependency in JMOD description: {line}")
+        if "static" not in parts[2:]:
+            required.add(parts[1])
+    return required
+
+
 def prepare(
     java_home: Path,
     force: bool,
@@ -237,8 +251,17 @@ def prepare(
 
         for module in modules:
             output_jmod = jmods_dir / f"{module}.jmod"
-            if jmod_module_name(jmod, output_jmod) != module:
+            description = run_tool(jmod, "describe", str(output_jmod))
+            lines = description.splitlines()
+            module_name = lines[0].partition("@")[0] if lines else ""
+            if module_name != module:
                 raise RuntimeError(f"prepared JMOD has the wrong module name: {output_jmod}")
+            missing = sorted(required_modules(description) - set(modules))
+            if missing:
+                raise RuntimeError(
+                    f"{module} needs missing runtime modules: {', '.join(missing)}; "
+                    "include them in --modules"
+                )
             if module == "java.base":
                 entries = run_tool(jmod, "list", str(output_jmod))
                 if "classes/java/lang/ThreadGroup.class" not in entries:

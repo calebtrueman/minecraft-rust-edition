@@ -131,6 +131,37 @@ class JavaHomeTests(unittest.TestCase):
             prepare.prepare(self.source, True, modules=("java.base", "java.sql"))
         self.assertFalse(self.output.exists())
 
+    def test_missing_runtime_dependency_keeps_previous_home(self):
+        self.extended_output.mkdir(parents=True)
+        (self.extended_output / "keep").write_text("previous complete home")
+
+        def missing_dependency(tool, *arguments):
+            result = self.jmod_tool(tool, *arguments)
+            if arguments[0] == "describe" and Path(arguments[1]).stem == "java.sql":
+                result += "requires java.prefs transitive\n"
+            return result
+
+        with patch.object(prepare, "run_tool", side_effect=missing_dependency):
+            with self.assertRaisesRegex(RuntimeError, "java.sql needs missing runtime modules: java.prefs"):
+                prepare.prepare(
+                    self.source,
+                    True,
+                    modules=("java.base", "java.sql"),
+                    output=self.extended_output,
+                )
+        self.assertEqual((self.extended_output / "keep").read_text(), "previous complete home")
+        self.assertEqual(list(self.scratch.iterdir()), [self.extended_output])
+
+    def test_runtime_dependencies_include_transitive_but_not_static_modules(self):
+        self.assertEqual(
+            prepare.required_modules(
+                "example.module@1\nrequires java.base mandated\n"
+                "requires java.xml transitive\nrequires java.compiler static\n"
+                "requires optional.api static transitive\nexports example.module\n"
+            ),
+            {"java.base", "java.xml"},
+        )
+
     def test_rejects_a_jmod_whose_descriptor_name_does_not_match(self):
         self.extended_output.mkdir(parents=True)
         (self.extended_output / "keep").write_text("previous extended home")
