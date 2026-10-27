@@ -16,11 +16,15 @@ use serde_json::json;
 
 const OPT_IN: &str = "RUST_EDITION_FABRIC_HOST_TEST";
 const SKIP_FAILURE_PROBES: &str = "RUST_EDITION_FABRIC_HOST_TEST_SKIP_FAILURE_PROBES";
+const EXTRA_MOD_JARS: &str = "RUST_EDITION_FABRIC_HOST_TEST_EXTRA_MOD_JARS";
+const EVIDENCE_DIR: &str = "RUST_EDITION_FABRIC_HOST_TEST_EVIDENCE_DIR";
+const MAX_EXTRA_MOD_METADATA_BYTES: u64 = 1024 * 1024;
 const TEST_MOD: &str = r#"
 package dev.rustedition.probe;
 
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
+import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.client.Minecraft;
 import net.minecraft.IdentifierException;
 import net.minecraft.resources.Identifier;
@@ -29,6 +33,8 @@ public final class TestMod implements ClientModInitializer, SnapshotTick {
     public static native int hostCall();
     public static native void observeWindow(
         Minecraft client, com.mojang.blaze3d.platform.Window window, int width, int height);
+    private static final String[] EXPECTED_EXTRA_MOD_IDS = __EXPECTED_EXTRA_MOD_IDS__;
+    private static final String[] EXPECTED_CLIENT_ENTRYPOINT_IDS = __EXPECTED_CLIENT_ENTRYPOINT_IDS__;
     private static int endTickCalls;
     private static int lateListenerCalls;
     private static boolean lateListenerRegistered;
@@ -53,7 +59,27 @@ public final class TestMod implements ClientModInitializer, SnapshotTick {
         }
         return Integer.toString(
                 snapshotJson.hashCode() + hostCall() + endTickCalls + lateListenerCalls)
-                + "|" + identifierResult() + "|" + codecPolicyResult();
+                + "|" + identifierResult() + "|" + codecPolicyResult()
+                + "|" + extraModsResult();
+    }
+
+    private static String extraModsResult() {
+        FabricLoader loader = FabricLoader.getInstance();
+        for (String modId : EXPECTED_EXTRA_MOD_IDS) {
+            if (!loader.isModLoaded(modId)) {
+                throw new AssertionError("expected extra mod was not loaded: " + modId);
+            }
+        }
+        for (String modId : EXPECTED_CLIENT_ENTRYPOINT_IDS) {
+            boolean found = loader.getEntrypointContainers("client", ClientModInitializer.class)
+                    .stream()
+                    .anyMatch(container -> container.getProvider().getMetadata().getId().equals(modId));
+            if (!found) {
+                throw new AssertionError(
+                        "client entrypoint container was missing for extra mod: " + modId);
+            }
+        }
+        return "mods-ok";
     }
 
     private static String identifierResult() {
@@ -178,6 +204,12 @@ public final class CycleFailureMod implements ModInitializer {
 }
 "#;
 
+struct ExtraModMetadata {
+    id: String,
+    has_client_entrypoint: bool,
+    evidence: serde_json::Value,
+}
+
 struct ScratchDir(PathBuf);
 
 impl ScratchDir {
@@ -208,6 +240,137 @@ fn required_path(name: &str, is_directory: bool) -> Result<PathBuf, Box<dyn std:
         return Err(format!("{name} has the wrong file type: {}", path.display()).into());
     }
     Ok(path)
+}
+
+fn extra_mod_jars() -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
+    let Some(paths) = env::var_os(EXTRA_MOD_JARS) else {
+        return Ok(Vec::new());
+    };
+    let paths = env::split_paths(&paths).collect::<Vec<_>>();
+    if paths.is_empty() || paths.iter().any(|path| path.as_os_str().is_empty()) {
+        return Err(format!("{EXTRA_MOD_JARS} must contain one or more JAR paths").into());
+    }
+    let mut canonical_paths = HashSet::new();
+    paths
+        .into_iter()
+        .map(|path| {
+            if !path.is_absolute() {
+                return Err(
+                    format!("extra mod JAR path must be absolute: {}", path.display()).into(),
+                );
+            }
+            let path = fs::canonicalize(path)?;
+            if !path.is_file() || path.extension().is_none_or(|extension| extension != "jar") {
+                return Err(
+                    format!("extra mod path must be a JAR file: {}", path.display()).into(),
+                );
+            }
+            if !canonical_paths.insert(path.clone()) {
+                return Err(format!(
+                    "extra mod JAR path is listed more than once: {}",
+                    path.display()
+                )
+                .into());
+            }
+            Ok(path)
+        })
+        .collect()
+}
+
+fn evidence_dir(extra_mod_jars: &[PathBuf]) -> Result<Option<PathBuf>, Box<dyn std::error::Error>> {
+    if extra_mod_jars.is_empty() {
+        return Ok(None);
+    }
+    let raw_path = env::var_os(EVIDENCE_DIR)
+        .ok_or_else(|| format!("set {EVIDENCE_DIR} when extra mod JARs are configured"))?;
+    let path = PathBuf::from(raw_path);
+    if !path.is_absolute() {
+        return Err(format!("{EVIDENCE_DIR} must be an absolute path").into());
+    }
+    if path.exists() {
+        return Err(format!(
+            "{EVIDENCE_DIR} already exists; choose a new evidence folder: {}",
+            path.display()
+        )
+        .into());
+    }
+    fs::create_dir_all(&path)?;
+    Ok(Some(path))
+}
+
+fn preserve_extra_mod_metadata(
+    jar_path: &Path,
+    evidence_dir: &Path,
+    index: usize,
+) -> Result<ExtraModMetadata, Box<dyn std::error::Error>> {
+    let byte_count = fs::metadata(jar_path)?.len();
+    let mut file = File::open(jar_path)?;
+    let mut hash = ring::digest::Context::new(&ring::digest::SHA256);
+    let mut buffer = [0; 64 * 1024];
+    loop {
+        let count = file.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        hash.update(&buffer[..count]);
+    }
+    let sha256 = hash
+        .finish()
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+
+    let mut archive = zip::ZipArchive::new(File::open(jar_path)?)?;
+    let metadata = archive.by_name("fabric.mod.json")?;
+    let size = metadata.size();
+    if size > MAX_EXTRA_MOD_METADATA_BYTES {
+        return Err(format!(
+            "extra mod fabric.mod.json exceeds {MAX_EXTRA_MOD_METADATA_BYTES} bytes: {}",
+            jar_path.display()
+        )
+        .into());
+    }
+    let metadata_file = format!("extra-mod-{index:04}-fabric.mod.json");
+    let mut metadata_bytes = Vec::with_capacity(size as usize);
+    let mut limited = metadata.take(MAX_EXTRA_MOD_METADATA_BYTES + 1);
+    limited.read_to_end(&mut metadata_bytes)?;
+    if metadata_bytes.len() as u64 != size {
+        return Err(format!(
+            "could not preserve the full top-level fabric.mod.json from {}",
+            jar_path.display()
+        )
+        .into());
+    }
+    fs::write(evidence_dir.join(&metadata_file), &metadata_bytes)?;
+    let metadata_value: serde_json::Value = serde_json::from_slice(&metadata_bytes)?;
+    let id = metadata_value
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|id| !id.is_empty())
+        .ok_or("extra mod fabric.mod.json has no non-empty id")?
+        .to_owned();
+    let has_client_entrypoint = metadata_value
+        .get("entrypoints")
+        .and_then(|entrypoints| entrypoints.get("client"))
+        .is_some_and(|definition| match definition {
+            serde_json::Value::String(value) => !value.is_empty(),
+            serde_json::Value::Array(values) => !values.is_empty(),
+            serde_json::Value::Object(values) => !values.is_empty(),
+            _ => false,
+        });
+    Ok(ExtraModMetadata {
+        id: id.clone(),
+        has_client_entrypoint,
+        evidence: json!({
+            "source_path": jar_path.display().to_string(),
+            "byte_count": byte_count,
+            "sha256": sha256,
+            "metadata_file": metadata_file,
+            "mod_id": id,
+            "has_client_entrypoint": has_client_entrypoint,
+        }),
+    })
 }
 
 fn minecraft_runtime_libraries(
@@ -488,6 +651,33 @@ async fn host_runs_fabric_and_returns_the_result_for_the_exact_bridge_snapshot()
         return Err("JAVA_HOME must include javac and jar for this opt-in test".into());
     }
 
+    let extra_mod_jars = extra_mod_jars()?;
+    let evidence_dir = evidence_dir(&extra_mod_jars)?;
+    let mut expected_extra_mod_ids = Vec::with_capacity(extra_mod_jars.len());
+    let mut expected_client_entrypoint_ids = Vec::new();
+    if let Some(evidence_dir) = evidence_dir.as_deref() {
+        let mut extra_mod_evidence = Vec::with_capacity(extra_mod_jars.len());
+        for (index, mod_jar) in extra_mod_jars.iter().enumerate() {
+            let metadata = preserve_extra_mod_metadata(mod_jar, evidence_dir, index + 1)?;
+            expected_extra_mod_ids.push(metadata.id.clone());
+            if metadata.has_client_entrypoint {
+                expected_client_entrypoint_ids.push(metadata.id.clone());
+            }
+            extra_mod_evidence.push(metadata.evidence);
+        }
+        fs::write(
+            evidence_dir.join("extra-mods.json"),
+            serde_json::to_vec_pretty(&json!({
+                "schema_version": 1,
+                "mods": extra_mod_evidence,
+            }))?,
+        )?;
+        eprintln!(
+            "preserving opt-in Fabric test evidence in {}",
+            evidence_dir.display()
+        );
+    }
+
     let scratch = ScratchDir::new()?;
     let classes = scratch.0.join("classes");
     let mod_jars = scratch.0.join("mods");
@@ -506,6 +696,14 @@ async fn host_runs_fabric_and_returns_the_result_for_the_exact_bridge_snapshot()
         .replace(
             "__FACTORY_ORDER_REFERENCE_RESULT__",
             &escaped_factory_reference,
+        )
+        .replace(
+            "__EXPECTED_EXTRA_MOD_IDS__",
+            &java_string_array(&expected_extra_mod_ids),
+        )
+        .replace(
+            "__EXPECTED_CLIENT_ENTRYPOINT_IDS__",
+            &java_string_array(&expected_client_entrypoint_ids),
         );
     fs::write(&mod_source, test_mod_source)?;
     fs::write(&tick_source, SNAPSHOT_TICK)?;
@@ -537,7 +735,10 @@ async fn host_runs_fabric_and_returns_the_result_for_the_exact_bridge_snapshot()
         &metadata,
         r#"{"schemaVersion":1,"id":"probe_mod","version":"1.0.0","entrypoints":{"client":["dev.rustedition.probe.TestMod"]},"depends":{"fabricloader":">=0.19.5","minecraft":"26.3"}}"#,
     )?;
-    let mod_jar = mod_jars.join("probe-mod.jar");
+    let mod_jar = evidence_dir
+        .as_ref()
+        .map(|directory| directory.join("probe-mod.jar"))
+        .unwrap_or_else(|| mod_jars.join("probe-mod.jar"));
     let package = Command::new(&jar)
         .arg("--create")
         .arg("--file")
@@ -557,7 +758,12 @@ async fn host_runs_fabric_and_returns_the_result_for_the_exact_bridge_snapshot()
         .into());
     }
 
-    let config = scratch.0.join("config.json");
+    let config = evidence_dir
+        .as_ref()
+        .map(|directory| directory.join("config.json"))
+        .unwrap_or_else(|| scratch.0.join("config.json"));
+    let mut configured_mods = vec![mod_jar.clone()];
+    configured_mods.extend(extra_mod_jars.iter().cloned());
     let config_json = json!({
         "schema_version": 2,
         "java_home": java_home.clone(),
@@ -566,7 +772,7 @@ async fn host_runs_fabric_and_returns_the_result_for_the_exact_bridge_snapshot()
         "fabric_api_jar": fabric_api.clone(),
         "minecraft_client_jar": game.clone(),
         "libraries": libraries,
-        "mods": [mod_jar],
+        "mods": configured_mods,
         "callback_mod_id": "probe_mod",
         "callback_class": "dev.rustedition.probe.TestMod"
     });
@@ -604,7 +810,7 @@ async fn host_runs_fabric_and_returns_the_result_for_the_exact_bridge_snapshot()
     };
     let initial_sequence = bridge.try_send_state(StateReason::Initial, initial_snapshot.clone())?;
     let initial_expected = format!(
-        "{}|identifiers-ok|blocked",
+        "{}|identifiers-ok|blocked|mods-ok",
         java_string_hash(&state_json(
             initial_sequence,
             StateReason::Initial,
@@ -629,7 +835,7 @@ async fn host_runs_fabric_and_returns_the_result_for_the_exact_bridge_snapshot()
     };
     let title_sequence = bridge.try_send_tick(title_snapshot.clone())?;
     let title_expected = format!(
-        "{}|identifiers-ok|blocked",
+        "{}|identifiers-ok|blocked|mods-ok",
         java_string_hash(&snapshot_json(title_sequence, &title_snapshot)?).wrapping_add(4)
     );
     wait_for_result(&bridge, title_sequence, &title_expected, "title tick").await?;
@@ -656,7 +862,7 @@ async fn host_runs_fabric_and_returns_the_result_for_the_exact_bridge_snapshot()
     };
     let sequence = bridge.try_send_tick(snapshot.clone())?;
     let expected = format!(
-        "{}|identifiers-ok|blocked",
+        "{}|identifiers-ok|blocked|mods-ok",
         java_string_hash(&snapshot_json(sequence, &snapshot)?).wrapping_add(7)
     );
     wait_for_result(&bridge, sequence, &expected, "world tick").await?;
@@ -667,7 +873,7 @@ async fn host_runs_fabric_and_returns_the_result_for_the_exact_bridge_snapshot()
     };
     let close_sequence = bridge.try_send_state(StateReason::WorldClosed, close_snapshot.clone())?;
     let close_expected = format!(
-        "{}|identifiers-ok|blocked",
+        "{}|identifiers-ok|blocked|mods-ok",
         java_string_hash(&state_json(
             close_sequence,
             StateReason::WorldClosed,
@@ -787,6 +993,15 @@ fn java_string_hash(value: &str) -> i32 {
 
 fn escape_java_string_literal(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn java_string_array(values: &[String]) -> String {
+    let values = values
+        .iter()
+        .map(|value| format!("\"{}\"", escape_java_string_literal(value)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("new String[] {{{values}}}")
 }
 
 async fn wait_for_result(

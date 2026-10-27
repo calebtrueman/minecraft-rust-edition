@@ -82,6 +82,13 @@ Rust; codec fields and other unimplemented calls remain unavailable. This is a s
 the Minecraft API. Existing Mixins still need a supported way to change native game behavior.
 Installed mods remain unsupported.
 
+A separate isolated check also started the unchanged installed Chat Heads 1.3.2 JAR for
+Minecraft 26.3 alongside the original probe. The probe explicitly checked that Fabric reported
+`chat_heads` loaded and provided its client entrypoint container. Normal startup and the probe's
+tick callbacks passed. The test records the JAR size and SHA-256 with replay files under ignored
+local evidence. This does not show Chat Heads' Mixins changing native chat or player heads
+appearing on screen; that rendering connection is still missing.
+
 ## What a full runtime needs
 
 The [JVM specification](https://docs.oracle.com/javase/specs/jvms/se25/html/) defines far more than a bytecode loop: class verification and linking, object and array behavior, method dispatch, exceptions, threads, and a large Java library. A Fabric mod also expects loader behavior. Fabric's [loader guide](https://docs.fabricmc.net/develop/loader/) describes entrypoints, dependencies, nested JARs and Mixins; its [`fabric.mod.json` guide](https://docs.fabricmc.net/develop/loader/fabric-mod-json) describes entrypoint, environment, and access-widener metadata.

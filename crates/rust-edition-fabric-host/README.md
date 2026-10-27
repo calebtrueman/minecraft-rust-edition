@@ -56,6 +56,31 @@ check, along with its security and time-zone files. See
 [the Java adapter](../rust-edition-java/README.md) for preparing those files.
 No game or loader files are bundled here.
 
+For a focused startup check with an installed mod, set
+`RUST_EDITION_FABRIC_HOST_TEST_EXTRA_MOD_JARS` to one or more absolute JAR paths,
+separated with the platform's path separator. Also set
+`RUST_EDITION_FABRIC_HOST_TEST_EVIDENCE_DIR` to a new absolute folder. The test
+keeps its generated probe JAR and exact config there, along with only each extra
+JAR's top-level `fabric.mod.json`. `extra-mods.json` records each original JAR's
+path, byte count, SHA-256, mod ID, and whether it declares a client entrypoint,
+so the run stays tied to those exact bytes. The probe checks every extra mod ID
+through Fabric Loader and checks for a client entrypoint container for each mod
+that declares one. The config still points to the original JAR. This checks mod
+startup and the probe callback. It does not prove the mod's in-game features
+work.
+
+With the paths above set, run only the positive callback check like this:
+
+```sh
+RUST_EDITION_FABRIC_HOST_TEST=1 \
+RUST_EDITION_FABRIC_HOST_TEST_SKIP_FAILURE_PROBES=1 \
+RUST_EDITION_FABRIC_HOST_TEST_EXTRA_MOD_JARS=/absolute/path/to/mod.jar \
+RUST_EDITION_FABRIC_HOST_TEST_EVIDENCE_DIR=/absolute/path/to/new-evidence-folder \
+cargo test --release --manifest-path crates/rust-edition-fabric-host/Cargo.toml \
+  --test host_bridge host_runs_fabric_and_returns_the_result_for_the_exact_bridge_snapshot \
+  -- --exact --nocapture
+```
+
 With those same path variables set and the game built, run the native game check:
 
 ```sh
