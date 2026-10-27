@@ -5,7 +5,8 @@ use std::env;
 use std::path::PathBuf;
 
 use rust_edition_mod_bridge::{
-    HelperConnection, HelperRequest, MAX_VALUE_BYTES, ResultStatus, snapshot_json,
+    HelperConnection, HelperRequest, MAX_VALUE_BYTES, ResultStatus, Snapshot, StateReason,
+    snapshot_json, state_json,
 };
 
 use crate::config::ValidatedConfig;
@@ -62,37 +63,48 @@ async fn run() -> Result<(), String> {
         match request {
             HelperRequest::Shutdown => return Ok(()),
             HelperRequest::Tick { seq, snapshot } => {
-                let json = match snapshot_json(seq, &snapshot) {
-                    Ok(json) => json,
-                    Err(error) => {
-                        let message = format!("could not encode game snapshot: {error}");
-                        let _ = connection.send_result(
-                            seq,
-                            ResultStatus::Failed,
-                            Some(bounded_text(&message, MAX_VALUE_BYTES)),
-                        );
-                        continue;
-                    }
-                };
-                let (status, value) = result_for_tick(&runtime, &json).await;
-                if let Err(error) = connection.send_result(seq, status, value) {
-                    let message = format!("could not send mod callback result: {error}");
-                    let _ = connection.fail(&message);
-                    return Err(message);
-                }
-                if status == ResultStatus::Failed {
-                    return Err("mod callback failed; the game has the error result".into());
-                }
+                process_frame(&mut connection, &runtime, seq, snapshot, None).await?;
+            }
+            HelperRequest::State {
+                seq,
+                reason,
+                snapshot,
+            } => {
+                process_frame(&mut connection, &runtime, seq, snapshot, Some(reason)).await?;
             }
         }
     }
 }
 
-async fn result_for_tick(
+async fn process_frame(
+    connection: &mut HelperConnection,
     runtime: &FabricRuntime,
-    snapshot_json: &str,
-) -> (ResultStatus, Option<String>) {
-    match runtime.on_snapshot(snapshot_json).await {
+    seq: u64,
+    snapshot: Snapshot,
+    state_reason: Option<StateReason>,
+) -> Result<(), String> {
+    let json_result = if let Some(reason) = state_reason {
+        state_json(seq, reason, &snapshot)
+    } else {
+        snapshot_json(seq, &snapshot)
+    };
+    let json = match json_result {
+        Ok(json) => json,
+        Err(error) => {
+            let message = format!("could not encode game snapshot: {error}");
+            let _ = connection.send_result(
+                seq,
+                ResultStatus::Failed,
+                Some(bounded_text(&message, MAX_VALUE_BYTES)),
+            );
+            return Err(message);
+        }
+    };
+    let dispatch_client_tick = state_reason.is_none();
+    let (status, value) = match runtime
+        .on_frame(&snapshot, &json, dispatch_client_tick)
+        .await
+    {
         Ok(Some(value)) if value.len() <= MAX_VALUE_BYTES => (ResultStatus::Ok, Some(value)),
         Ok(None) => (ResultStatus::Ok, None),
         Ok(Some(_)) => (
@@ -105,7 +117,16 @@ async fn result_for_tick(
             ResultStatus::Failed,
             Some(bounded_text(&error, MAX_VALUE_BYTES)),
         ),
+    };
+    if let Err(error) = connection.send_result(seq, status, value) {
+        let message = format!("could not send mod callback result: {error}");
+        let _ = connection.fail(&message);
+        return Err(message);
     }
+    if status == ResultStatus::Failed {
+        return Err("mod callback failed; the game has the error result".into());
+    }
+    Ok(())
 }
 
 fn report_startup_failure(connection: &mut HelperConnection, message: String) -> String {

@@ -2,7 +2,8 @@
 //!
 //! The helper runs as a child process. It sees only read-only snapshots, and
 //! can return only a short status line. Every frame has a fixed size limit,
-//! and every request must get a reply before its deadline.
+//! and every request must get a reply before its deadline. The bounded queue
+//! holds the game's 10-step catch-up burst plus two nearby state frames.
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{
@@ -22,13 +23,15 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub const PROTOCOL_VERSION: u8 = 1;
+pub const PROTOCOL_VERSION: u8 = 2;
 pub const MAX_CLIENT_FRAME_BYTES: usize = 4096;
 pub const MAX_HELPER_FRAME_BYTES: usize = 1024;
-pub const MAX_OUTSTANDING: usize = 4;
+/// Holds up to 10 catch-up ticks and two lifecycle state frames.
+pub const MAX_OUTSTANDING: usize = 12;
 pub const MAX_VALUE_BYTES: usize = 256;
 pub const MAX_DIMENSION_BYTES: usize = 128;
-pub const STARTUP_DEADLINE: Duration = Duration::from_secs(60);
+pub const MAX_FRAMEBUFFER_DIMENSION: u32 = 32_768;
+pub const STARTUP_DEADLINE: Duration = Duration::from_secs(120);
 pub const TICK_DEADLINE: Duration = Duration::from_secs(1);
 
 /// Child-process settings. All three paths must be absolute, and the config
@@ -80,17 +83,55 @@ pub struct ClockSnapshot {
     pub day_time: i64,
 }
 
-/// The state sent once for each accepted client tick.
+/// The pixel dimensions of the window's current renderer framebuffer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FramebufferSnapshot {
+    pub width: u32,
+    pub height: u32,
+}
+
+impl FramebufferSnapshot {
+    fn validate(self) -> Result<(), BridgeError> {
+        if self.width > MAX_FRAMEBUFFER_DIMENSION || self.height > MAX_FRAMEBUFFER_DIMENSION {
+            return Err(BridgeError::Protocol(format!(
+                "framebuffer dimensions exceed {MAX_FRAMEBUFFER_DIMENSION} pixels"
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// Why the game sent a state update that did not finish a client tick.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StateReason {
+    Initial,
+    Title,
+    WorldClosed,
+}
+
+/// The kind of client information the helper received.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FrameKind {
+    Tick,
+    State,
+}
+
+/// Read-only client state shared by tick and lifecycle frames.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Snapshot {
     pub world_open: bool,
     pub player: Option<PlayerSnapshot>,
     pub clock: Option<ClockSnapshot>,
+    pub framebuffer: FramebufferSnapshot,
 }
 
 impl Snapshot {
     pub fn validate(&self) -> Result<(), BridgeError> {
+        self.framebuffer.validate()?;
         if let Some(player) = &self.player {
             if !player.x.is_finite()
                 || !player.y.is_finite()
@@ -123,22 +164,66 @@ impl Snapshot {
     }
 }
 
-/// Returns the exact JSON body used for a tick frame. The helper and its test
-/// fixture can use this single serializer when they need a stable input string.
+/// Returns the exact JSON body used for a completed client tick.
 pub fn snapshot_json(seq: u64, snapshot: &Snapshot) -> Result<String, BridgeError> {
+    frame_json(
+        HostFrame::Tick {
+            v: PROTOCOL_VERSION,
+            seq,
+            world_open: snapshot.world_open,
+            player: snapshot.player.clone(),
+            clock: snapshot.clock.clone(),
+            framebuffer: snapshot.framebuffer,
+        },
+        snapshot,
+    )
+}
+
+/// Returns the exact JSON body used for an initial, title, or world-close
+/// state update. These frames never mean that a client tick completed.
+pub fn state_json(
+    seq: u64,
+    reason: StateReason,
+    snapshot: &Snapshot,
+) -> Result<String, BridgeError> {
+    reason.validate(snapshot)?;
+    frame_json(
+        HostFrame::State {
+            v: PROTOCOL_VERSION,
+            seq,
+            reason,
+            world_open: snapshot.world_open,
+            player: snapshot.player.clone(),
+            clock: snapshot.clock.clone(),
+            framebuffer: snapshot.framebuffer,
+        },
+        snapshot,
+    )
+}
+
+impl StateReason {
+    fn validate(self, snapshot: &Snapshot) -> Result<(), BridgeError> {
+        if matches!(self, Self::Title | Self::WorldClosed) && snapshot.world_open {
+            return Err(BridgeError::Protocol(format!(
+                "a {} state must describe a closed world",
+                match self {
+                    Self::Title => "title",
+                    Self::WorldClosed => "world-closed",
+                    Self::Initial => unreachable!(),
+                }
+            )));
+        }
+        Ok(())
+    }
+}
+
+fn frame_json(frame: HostFrame, snapshot: &Snapshot) -> Result<String, BridgeError> {
     snapshot.validate()?;
-    let frame = HostFrame::Tick {
-        v: PROTOCOL_VERSION,
-        seq,
-        world_open: snapshot.world_open,
-        player: snapshot.player.clone(),
-        clock: snapshot.clock.clone(),
-    };
     let json = serde_json::to_string(&frame)
         .map_err(|error| BridgeError::Protocol(format!("could not encode JSON: {error}")))?;
     if json.len() > MAX_CLIENT_FRAME_BYTES {
         return Err(BridgeError::Protocol(format!(
-            "tick snapshot is {} bytes; limit is {MAX_CLIENT_FRAME_BYTES}",
+            "client frame is {} bytes; limit is {MAX_CLIENT_FRAME_BYTES}",
             json.len()
         )));
     }
@@ -164,6 +249,18 @@ pub enum HostFrame {
         player: Option<PlayerSnapshot>,
         #[serde(skip_serializing_if = "Option::is_none")]
         clock: Option<ClockSnapshot>,
+        framebuffer: FramebufferSnapshot,
+    },
+    State {
+        v: u8,
+        seq: u64,
+        reason: StateReason,
+        world_open: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        player: Option<PlayerSnapshot>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        clock: Option<ClockSnapshot>,
+        framebuffer: FramebufferSnapshot,
     },
     Shutdown {
         v: u8,
@@ -208,7 +305,15 @@ pub enum ResultStatus {
 /// A validated request received by a helper process.
 #[derive(Clone, Debug, PartialEq)]
 pub enum HelperRequest {
-    Tick { seq: u64, snapshot: Snapshot },
+    Tick {
+        seq: u64,
+        snapshot: Snapshot,
+    },
+    State {
+        seq: u64,
+        reason: StateReason,
+        snapshot: Snapshot,
+    },
     Shutdown,
 }
 
@@ -224,7 +329,7 @@ pub struct HelperConnection {
 
 impl HelperConnection {
     /// Reads the private address and token from the child environment, then
-    /// completes the shared v1 handshake.
+    /// completes the shared v2 handshake.
     pub fn connect_from_env() -> Result<Self, BridgeError> {
         let address = std::env::var(CHILD_ADDRESS_ENV)
             .map_err(|_| BridgeError::InvalidConfig(format!("missing {CHILD_ADDRESS_ENV}")))?;
@@ -332,8 +437,8 @@ impl HelperConnection {
         Ok(())
     }
 
-    /// Waits for one tick or shutdown message. Tick sequence numbers must
-    /// arrive in order and each snapshot must pass the shared validation.
+    /// Waits for one tick, state update, or shutdown message. Sequence numbers
+    /// must arrive in order and every snapshot must pass shared validation.
     pub fn receive(&mut self) -> Result<HelperRequest, BridgeError> {
         if self.failed {
             return Err(BridgeError::Stopped);
@@ -357,6 +462,7 @@ impl HelperConnection {
                 world_open,
                 player,
                 clock,
+                framebuffer,
             } if v == PROTOCOL_VERSION => {
                 if seq != self.next_sequence {
                     return Err(BridgeError::Protocol(format!(
@@ -371,6 +477,7 @@ impl HelperConnection {
                     world_open,
                     player,
                     clock,
+                    framebuffer,
                 };
                 snapshot.validate()?;
                 self.next_sequence = next_sequence;
@@ -378,6 +485,43 @@ impl HelperConnection {
                 Ok(HelperRequest::Tick { seq, snapshot })
             }
             HostFrame::Tick { v, .. } => Err(BridgeError::Protocol(format!(
+                "unsupported protocol version {v}"
+            ))),
+            HostFrame::State {
+                v,
+                seq,
+                reason,
+                world_open,
+                player,
+                clock,
+                framebuffer,
+            } if v == PROTOCOL_VERSION => {
+                if seq != self.next_sequence {
+                    return Err(BridgeError::Protocol(format!(
+                        "request sequence {seq} did not match expected {}",
+                        self.next_sequence
+                    )));
+                }
+                let Some(next_sequence) = seq.checked_add(1) else {
+                    return Err(BridgeError::SequenceExhausted);
+                };
+                let snapshot = Snapshot {
+                    world_open,
+                    player,
+                    clock,
+                    framebuffer,
+                };
+                snapshot.validate()?;
+                reason.validate(&snapshot)?;
+                self.next_sequence = next_sequence;
+                self.pending_sequence = Some(seq);
+                Ok(HelperRequest::State {
+                    seq,
+                    reason,
+                    snapshot,
+                })
+            }
+            HostFrame::State { v, .. } => Err(BridgeError::Protocol(format!(
                 "unsupported protocol version {v}"
             ))),
             HostFrame::Shutdown { v } if v == PROTOCOL_VERSION => {
@@ -400,7 +544,7 @@ impl HelperConnection {
         }
     }
 
-    /// Sends the read-only result for the most recent tick.
+    /// Sends the read-only result for the most recent tick or state frame.
     pub fn send_result(
         &mut self,
         seq: u64,
@@ -442,10 +586,12 @@ impl HelperConnection {
     }
 }
 
-/// A tick reply the game can show or log.
+/// A reply to one tick or state frame.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TickResult {
     pub seq: u64,
+    pub kind: FrameKind,
+    pub state_reason: Option<StateReason>,
     pub status: ResultStatus,
     pub value: Option<String>,
     /// Exact JSON body sent with this tick. This is local metadata, not a wire field.
@@ -488,7 +634,7 @@ impl fmt::Display for BridgeError {
         match self {
             Self::InvalidConfig(message) => write!(f, "invalid helper configuration: {message}"),
             Self::NotReady => f.write_str("helper is still starting"),
-            Self::QueueFull => f.write_str("helper did not keep up with game ticks"),
+            Self::QueueFull => f.write_str("helper did not keep up with client frames"),
             Self::Stopped => f.write_str("helper has stopped"),
             Self::Cancelled => f.write_str("helper startup or request was cancelled"),
             Self::Timeout(phase) => write!(f, "helper timed out during {phase}"),
@@ -499,15 +645,17 @@ impl fmt::Display for BridgeError {
             Self::HelperFailed(message) => write!(f, "helper failed: {message}"),
             Self::Protocol(message) => write!(f, "helper sent an invalid message: {message}"),
             Self::Io(message) => write!(f, "helper communication failed: {message}"),
-            Self::SequenceExhausted => f.write_str("helper tick sequence ran out"),
+            Self::SequenceExhausted => f.write_str("helper frame sequence ran out"),
         }
     }
 }
 
 impl std::error::Error for BridgeError {}
 
-struct QueuedTick {
+struct QueuedFrame {
     seq: u64,
+    kind: FrameKind,
+    state_reason: Option<StateReason>,
     snapshot: Snapshot,
     snapshot_json: String,
 }
@@ -516,7 +664,7 @@ struct QueuedTick {
 pub struct Bridge {
     status: Arc<Mutex<BridgeStatus>>,
     cancel: Arc<AtomicBool>,
-    requests: SyncSender<QueuedTick>,
+    requests: SyncSender<QueuedFrame>,
     replies: Receiver<TickResult>,
     outstanding: Arc<AtomicUsize>,
     next_sequence: u64,
@@ -641,9 +789,33 @@ impl Bridge {
         }
     }
 
-    /// Enqueues one snapshot and returns its sequence. Calling this before the
-    /// helper is ready does not queue a request or count a missed tick.
+    /// Compatibility alias for `try_send_tick`.
     pub fn try_send(&mut self, snapshot: Snapshot) -> Result<u64, BridgeError> {
+        self.try_send_tick(snapshot)
+    }
+
+    /// Enqueues one completed client tick and returns its sequence. Calling
+    /// this before the helper is ready does not queue a request or count a tick.
+    pub fn try_send_tick(&mut self, snapshot: Snapshot) -> Result<u64, BridgeError> {
+        self.try_send_frame(FrameKind::Tick, None, snapshot)
+    }
+
+    /// Enqueues one synthetic state update that must not dispatch a client
+    /// tick event in the helper.
+    pub fn try_send_state(
+        &mut self,
+        reason: StateReason,
+        snapshot: Snapshot,
+    ) -> Result<u64, BridgeError> {
+        self.try_send_frame(FrameKind::State, Some(reason), snapshot)
+    }
+
+    fn try_send_frame(
+        &mut self,
+        kind: FrameKind,
+        state_reason: Option<StateReason>,
+        snapshot: Snapshot,
+    ) -> Result<u64, BridgeError> {
         match self.status() {
             BridgeStatus::Starting => return Err(BridgeError::NotReady),
             BridgeStatus::Ready => {}
@@ -655,7 +827,12 @@ impl Bridge {
             return Err(error);
         }
         let seq = self.next_sequence;
-        let snapshot_json = match snapshot_json(seq, &snapshot) {
+        let json_result = match (kind, state_reason) {
+            (FrameKind::Tick, None) => snapshot_json(seq, &snapshot),
+            (FrameKind::State, Some(reason)) => state_json(seq, reason, &snapshot),
+            _ => unreachable!("frame kind and state reason must agree"),
+        };
+        let snapshot_json = match json_result {
             Ok(json) => json,
             Err(error) => {
                 self.fail_fast(error.clone());
@@ -683,8 +860,10 @@ impl Bridge {
                 Err(current) => outstanding = current,
             }
         }
-        let request = QueuedTick {
+        let request = QueuedFrame {
             seq,
+            kind,
+            state_reason,
             snapshot,
             snapshot_json,
         };
@@ -925,7 +1104,7 @@ fn run_worker(
     token: String,
     mut child: ChildGuard,
     startup_deadline: Instant,
-    requests: Receiver<QueuedTick>,
+    requests: Receiver<QueuedFrame>,
     replies: SyncSender<TickResult>,
     status: Arc<Mutex<BridgeStatus>>,
     cancel: Arc<AtomicBool>,
@@ -1155,12 +1334,25 @@ fn run_worker(
             }
         };
         let deadline = Instant::now() + TICK_DEADLINE;
-        let frame = HostFrame::Tick {
-            v: PROTOCOL_VERSION,
-            seq: request.seq,
-            world_open: request.snapshot.world_open,
-            player: request.snapshot.player,
-            clock: request.snapshot.clock,
+        let frame = match (request.kind, request.state_reason) {
+            (FrameKind::Tick, None) => HostFrame::Tick {
+                v: PROTOCOL_VERSION,
+                seq: request.seq,
+                world_open: request.snapshot.world_open,
+                player: request.snapshot.player,
+                clock: request.snapshot.clock,
+                framebuffer: request.snapshot.framebuffer,
+            },
+            (FrameKind::State, Some(reason)) => HostFrame::State {
+                v: PROTOCOL_VERSION,
+                seq: request.seq,
+                reason,
+                world_open: request.snapshot.world_open,
+                player: request.snapshot.player,
+                clock: request.snapshot.clock,
+                framebuffer: request.snapshot.framebuffer,
+            },
+            _ => unreachable!("frame kind and state reason must agree"),
         };
         if let Err(error) = write_frame_with_cancel(
             &mut stream,
@@ -1236,6 +1428,8 @@ fn run_worker(
                 }
                 TickResult {
                     seq,
+                    kind: request.kind,
+                    state_reason: request.state_reason,
                     status: result_status,
                     value,
                     snapshot_json: request.snapshot_json,
@@ -1624,6 +1818,10 @@ mod tests {
         fn marker(&self) -> PathBuf {
             self.0.join("helper-stopped")
         }
+
+        fn batch_marker(&self) -> PathBuf {
+            self.0.join("batch-processed")
+        }
     }
 
     impl Drop for TestDir {
@@ -1720,6 +1918,21 @@ mod tests {
             let _ = helper.fail("runtime callback failed while idle");
             return;
         }
+        if mode == "delayed-batch" {
+            let Some(parent) = Path::new(&config).parent() else {
+                return;
+            };
+            let release = parent.join("release-batch");
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !release.exists() {
+                if Instant::now() >= deadline {
+                    let _ = helper.fail("delayed queue test was not released");
+                    return;
+                }
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
+        let mut completed_requests = 0;
         loop {
             match helper.receive() {
                 Ok(HelperRequest::Shutdown) => {
@@ -1746,6 +1959,33 @@ mod tests {
                     {
                         return;
                     }
+                    completed_requests += 1;
+                    if mode == "delayed-batch" && completed_requests == MAX_OUTSTANDING {
+                        if let Some(parent) = Path::new(&config).parent() {
+                            let _ = fs::write(parent.join("batch-processed"), "done");
+                        }
+                    }
+                }
+                Ok(HelperRequest::State {
+                    seq,
+                    reason,
+                    snapshot,
+                }) => {
+                    let Ok(value) = state_json(seq, reason, &snapshot) else {
+                        return;
+                    };
+                    if helper
+                        .send_result(seq, ResultStatus::Ok, Some(value))
+                        .is_err()
+                    {
+                        return;
+                    }
+                    completed_requests += 1;
+                    if mode == "delayed-batch" && completed_requests == MAX_OUTSTANDING {
+                        if let Some(parent) = Path::new(&config).parent() {
+                            let _ = fs::write(parent.join("batch-processed"), "done");
+                        }
+                    }
                 }
                 Err(_) => return,
             }
@@ -1757,8 +1997,19 @@ mod tests {
         let snapshot = Snapshot::default();
         assert_eq!(
             snapshot_json(7, &snapshot).unwrap(),
-            r#"{"kind":"tick","v":1,"seq":7,"world_open":false}"#
+            r#"{"kind":"tick","v":2,"seq":7,"world_open":false,"framebuffer":{"width":0,"height":0}}"#
         );
+        assert_eq!(
+            state_json(8, StateReason::WorldClosed, &snapshot).unwrap(),
+            r#"{"kind":"state","v":2,"seq":8,"reason":"world_closed","world_open":false,"framebuffer":{"width":0,"height":0}}"#
+        );
+        let open_world = Snapshot {
+            world_open: true,
+            ..Snapshot::default()
+        };
+        assert!(state_json(9, StateReason::Title, &open_world).is_err());
+        assert!(state_json(9, StateReason::WorldClosed, &open_world).is_err());
+        assert!(state_json(9, StateReason::Initial, &open_world).is_ok());
         let bad: Result<HostFrame, _> =
             serde_json::from_str(r#"{"kind":"ready","v":1,"extra":true}"#);
         assert!(bad.is_err());
@@ -1777,6 +2028,7 @@ mod tests {
                 world_open: true,
                 player: Some(bad_player),
                 clock: None,
+                ..Snapshot::default()
             }
             .validate()
             .is_err()
@@ -1795,6 +2047,7 @@ mod tests {
                 world_open: true,
                 player: Some(long_dimension),
                 clock: None,
+                ..Snapshot::default()
             }
             .validate()
             .is_err()
@@ -1827,6 +2080,58 @@ mod tests {
             dir.marker().exists(),
             "helper did not exit after shutdown ack"
         );
+    }
+
+    #[test]
+    fn state_frames_share_sequence_and_keep_their_kind() {
+        let dir = TestDir::new();
+        let mut bridge = dir.helper("echo");
+        wait_for_status(&bridge, BridgeStatus::is_ready);
+        let snapshot = Snapshot::default();
+
+        let initial = bridge
+            .try_send_state(StateReason::Initial, snapshot.clone())
+            .unwrap();
+        let tick = bridge.try_send_tick(snapshot.clone()).unwrap();
+        let closed = bridge
+            .try_send_state(StateReason::WorldClosed, snapshot.clone())
+            .unwrap();
+        assert_eq!([initial, tick, closed], [1, 2, 3]);
+
+        let replies = (0..3).map(|_| wait_for_reply(&bridge)).collect::<Vec<_>>();
+        assert_eq!(
+            (replies[0].kind, replies[0].state_reason),
+            (FrameKind::State, Some(StateReason::Initial))
+        );
+        assert_eq!(
+            replies[0].value.as_deref(),
+            Some(
+                state_json(initial, StateReason::Initial, &snapshot)
+                    .unwrap()
+                    .as_str()
+            )
+        );
+        assert_eq!(
+            (replies[1].kind, replies[1].state_reason),
+            (FrameKind::Tick, None)
+        );
+        assert_eq!(
+            replies[1].value.as_deref(),
+            Some(snapshot_json(tick, &snapshot).unwrap().as_str())
+        );
+        assert_eq!(
+            (replies[2].kind, replies[2].state_reason),
+            (FrameKind::State, Some(StateReason::WorldClosed))
+        );
+        assert_eq!(
+            replies[2].value.as_deref(),
+            Some(
+                state_json(closed, StateReason::WorldClosed, &snapshot)
+                    .unwrap()
+                    .as_str()
+            )
+        );
+        bridge.shutdown();
     }
 
     #[test]
@@ -1885,6 +2190,46 @@ mod tests {
             wait_for_status(&bridge, |status| matches!(status, BridgeStatus::Failed(_))),
             BridgeStatus::Failed(BridgeError::Timeout("reading a frame"))
         );
+    }
+
+    #[test]
+    fn delayed_helper_accepts_ten_ticks_and_two_state_frames_then_rejects_more() {
+        let dir = TestDir::new();
+        let mut bridge = dir.helper("delayed-batch");
+        wait_for_status(&bridge, BridgeStatus::is_ready);
+        let snapshot = Snapshot::default();
+
+        assert_eq!(
+            bridge
+                .try_send_state(StateReason::Initial, snapshot.clone())
+                .unwrap(),
+            1
+        );
+        for expected in 2..=11 {
+            assert_eq!(bridge.try_send_tick(snapshot.clone()).unwrap(), expected);
+        }
+        assert_eq!(
+            bridge
+                .try_send_state(StateReason::WorldClosed, snapshot.clone())
+                .unwrap(),
+            12
+        );
+
+        fs::write(dir.0.join("release-batch"), "go").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !dir.batch_marker().exists() {
+            assert!(
+                Instant::now() < deadline,
+                "helper did not process all 10 ticks and 2 state frames"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(bridge.try_send_tick(snapshot), Err(BridgeError::QueueFull));
+        assert_eq!(
+            wait_for_status(&bridge, |status| matches!(status, BridgeStatus::Failed(_))),
+            BridgeStatus::Failed(BridgeError::QueueFull)
+        );
+        bridge.shutdown();
     }
 
     #[test]

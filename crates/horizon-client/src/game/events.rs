@@ -3,6 +3,7 @@
 //! what the game does.
 use super::Game;
 use horizon_client::Result;
+use rust_edition_mod_bridge::{FrameKind, StateReason};
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -55,12 +56,14 @@ pub(super) struct Events {
 }
 
 impl Events {
-    /// Adds the bounded input and reply for an opt-in helper tick. The
+    /// Adds the bounded input and reply for an opt-in helper frame. The
     /// ordinary `seq` stays the control-event id; `bridge_seq` is the helper id.
     pub(super) fn java_mod_reply(
         &mut self,
         tick: u64,
         bridge_seq: u64,
+        kind: FrameKind,
+        state_reason: Option<StateReason>,
         status: &str,
         snapshot_json: String,
         value: Option<String>,
@@ -70,6 +73,15 @@ impl Events {
             json!({
                 "event": "java_mod_reply",
                 "bridge_seq": bridge_seq,
+                "frame_kind": match kind {
+                    FrameKind::Tick => "tick",
+                    FrameKind::State => "state",
+                },
+                "state_reason": state_reason.map(|reason| match reason {
+                    StateReason::Initial => "initial",
+                    StateReason::Title => "title",
+                    StateReason::WorldClosed => "world_closed",
+                }),
                 "status": status,
                 "snapshot_json": snapshot_json,
                 "value": value,

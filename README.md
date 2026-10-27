@@ -27,8 +27,10 @@ This is work in progress, not a finished replacement for Java Edition.
 - **Existing Fabric mods are not supported yet.** Reading a modpack's data and assets
   is not the same as running its mods. An isolated test starts Fabric and Mixin through the
   Rust-based Ristretto VM and runs one tiny test mod. An optional helper now connects that
-  work to copied player and clock values from the game. It uses a custom test callback;
-  existing mods still need their Minecraft calls and Mixins connected to the Rust game.
+  work to copied player, clock, and window-size values from the game. It calls the real
+  Fabric client-tick event with persistent client and window objects, and uses a custom
+  test callback to check the results. Selected resource-name calls also run in Rust.
+  Existing mods still need the rest of their Minecraft calls and Mixins connected to the Rust game.
   See [the compatibility work](docs/java-mod-compatibility.md).
 - Updates point to this fork. No fork release binaries have been published yet. Release signing
   still needs this fork's own key before distributing builds.

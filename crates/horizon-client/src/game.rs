@@ -1598,6 +1598,8 @@ struct Game<'a> {
     java_mod_bridge: Option<rust_edition_mod_bridge::Bridge>,
     /// Whether this helper has received any current-state snapshot yet.
     java_mod_bridge_has_sent_snapshot: bool,
+    /// A lifecycle state that happened while the helper was still starting.
+    java_mod_bridge_pending_state: Option<rust_edition_mod_bridge::StateReason>,
     /// The last helper state shown to the player.
     java_mod_bridge_reported: Option<rust_edition_mod_bridge::BridgeStatus>,
     /// Horizon's own shader pack, while one is picked (`game/native_shaders.rs`).
@@ -12303,6 +12305,7 @@ impl ApplicationHandler for Game<'_> {
                         self.tick_win_screen()?;
                         self.tick_music();
                         self.tick_sound_engine();
+                        self.tick_java_mod_bridge();
                         self.clock.record(started.elapsed());
                         spent += started.elapsed();
                         if let Some(report) = self.clock.take_sprint_report() {
@@ -12834,6 +12837,7 @@ impl<'a> Game<'a> {
             mods: Default::default(),
             java_mod_bridge: None,
             java_mod_bridge_has_sent_snapshot: false,
+            java_mod_bridge_pending_state: None,
             java_mod_bridge_reported: None,
             native_shaders: Default::default(),
             sky_darken_memo: Default::default(),

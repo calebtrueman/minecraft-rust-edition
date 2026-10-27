@@ -54,25 +54,33 @@ The optional `rust-edition-mod-bridge` now connects the game to a separate
 copied player and clock values and can return a short string. The game sends no mutable game
 objects. This stays separate from the existing `horizon-mods` WebAssembly runtime.
 
-The test mod uses a custom `onSnapshot(String)` method. This is a test connection, not the
-Fabric tick-event API used by existing mods. The helper starts only when its executable and
+The test mod uses a custom `onSnapshot(String)` method to report results. The helper now also
+calls the real Fabric `ClientTickEvents.END_CLIENT_TICK` event for completed client ticks.
+It passes persistent Minecraft and Window mirror objects whose window size comes from the
+Rust frame. The helper starts only when its executable and
 config paths are explicitly set. It reports ready after Fabric has started and the mod has
 loaded. The connection has size limits, a short queue, and reply deadlines; a failed helper
 stops receiving snapshots. Its working files go in a fresh temporary folder.
 
-The native game check passed in both local game-loop modes. It compared the Java reply
-with the exact sent snapshot and checked position, health, dimension, and clock values.
-It also checked a cleared snapshot after leaving the world and helper-folder cleanup after
-quitting. These checks use an original test mod; they do not cover installed mods.
+The native game check passed in both local game-loop modes with the real Fabric tick event.
+It compared the Java reply with the exact sent snapshot and checked position, health,
+dimension, clock values, and framebuffer size. It checked three title ticks and three paused
+ticks, a separate world-close state update, a following title tick, and helper-folder cleanup
+after quitting. A state update does not count as a Fabric tick. The connection allows up to
+twelve outstanding frames so ten catch-up ticks and two state updates fit without dropping
+callbacks. These checks use an original test mod; they do not cover installed mods.
 
 The helper blocks Java method calls on Minecraft gameplay and rendering classes while their
 Rust replacements are missing. This prevents those calls from quietly running Java gameplay.
 It is not a file or network sandbox. The helper runs with the user's operating-system access,
 so a separate process and temporary folders do not make an untrusted JAR safe.
 
-The next compatibility step is to connect actual Minecraft objects and Fabric callbacks to
-Rust game state. Existing Mixins also need a supported way to change native game behavior.
-Neither is supplied by the snapshot test. Installed mods remain unsupported.
+The standalone host check passed normal Fabric entrypoint startup, real title and world tick
+callbacks, stable mirror identity, and copied framebuffer values. It also compared selected
+resource-name operations with Minecraft 26.3 results. Those `Identifier` operations run in
+Rust; codec fields and other unimplemented calls remain unavailable. This is a small part of
+the Minecraft API. Existing Mixins still need a supported way to change native game behavior.
+Installed mods remain unsupported.
 
 ## What a full runtime needs
 

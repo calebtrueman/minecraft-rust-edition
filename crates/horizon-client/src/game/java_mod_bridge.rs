@@ -1,13 +1,13 @@
 //! Optional Java/Fabric helper for the game window.
 //!
-//! This is only a read-only tick feed. The helper sees a small player and
-//! clock snapshot and may return a short status value.
+//! This is only a read-only client frame feed. The helper sees a small player
+//! and clock snapshot and may return a short status value.
 
 use super::Game;
 use horizon_client::text::Text;
 use rust_edition_mod_bridge::{
-    Bridge, BridgeError, BridgeStatus, ClockSnapshot, PlayerSnapshot, ResultStatus, Snapshot,
-    SpawnConfig,
+    Bridge, BridgeError, BridgeStatus, ClockSnapshot, FrameKind, FramebufferSnapshot,
+    PlayerSnapshot, ResultStatus, Snapshot, SpawnConfig, StateReason,
 };
 use std::{env, path::PathBuf};
 
@@ -35,6 +35,7 @@ impl Game<'_> {
                     Ok(bridge) => {
                         self.java_mod_bridge = Some(bridge);
                         self.java_mod_bridge_has_sent_snapshot = false;
+                        self.java_mod_bridge_pending_state = None;
                         self.report_java_mod_bridge_status(BridgeStatus::Starting);
                     }
                     Err(error) => self.report_java_mod_bridge_status(BridgeStatus::Failed(error)),
@@ -48,14 +49,15 @@ impl Game<'_> {
         }
     }
 
-    /// Sends one read-only state snapshot after each ready helper tick.
+    /// Sends one read-only snapshot after each completed client tick.
     pub(super) fn tick_java_mod_bridge(&mut self) {
         if self.java_mod_bridge.is_none() {
             return;
         }
         self.poll_java_mod_bridge();
+        self.send_initial_java_mod_bridge_snapshot();
         let snapshot = self.java_mod_bridge_snapshot();
-        self.send_java_mod_bridge_snapshot(snapshot);
+        self.send_java_mod_bridge_frame(FrameKind::Tick, None, snapshot);
     }
 
     /// Polls the worker outside game ticks, including while the window is at title.
@@ -82,6 +84,8 @@ impl Game<'_> {
                 self.events.java_mod_reply(
                     self.ticks,
                     reply.seq,
+                    reply.kind,
+                    reply.state_reason,
                     status,
                     reply.snapshot_json.clone(),
                     reply.value.clone(),
@@ -112,7 +116,19 @@ impl Game<'_> {
             return;
         }
         let snapshot = self.java_mod_bridge_snapshot();
-        self.send_java_mod_bridge_snapshot(snapshot);
+        let pending_reason = self
+            .java_mod_bridge_pending_state
+            .filter(|reason| !matches!(reason, StateReason::WorldClosed) || !snapshot.world_open);
+        let reason = pending_reason.unwrap_or_else(|| {
+            if self.title.is_some() {
+                StateReason::Title
+            } else {
+                StateReason::Initial
+            }
+        });
+        if self.send_java_mod_bridge_frame(FrameKind::State, Some(reason), snapshot) {
+            self.java_mod_bridge_pending_state = None;
+        }
     }
 
     /// Queues one no-player snapshot when a world closes, if the helper is ready.
@@ -122,17 +138,36 @@ impl Game<'_> {
             return;
         }
         self.poll_java_mod_bridge();
-        self.send_java_mod_bridge_snapshot(Snapshot::default());
+        let snapshot = self.java_mod_bridge_snapshot();
+        if self.java_mod_bridge_has_sent_snapshot {
+            self.send_java_mod_bridge_frame(
+                FrameKind::State,
+                Some(StateReason::WorldClosed),
+                snapshot,
+            );
+        } else {
+            self.java_mod_bridge_pending_state = Some(StateReason::WorldClosed);
+        }
     }
 
-    fn send_java_mod_bridge_snapshot(&mut self, snapshot: Snapshot) {
+    fn send_java_mod_bridge_frame(
+        &mut self,
+        kind: FrameKind,
+        reason: Option<StateReason>,
+        snapshot: Snapshot,
+    ) -> bool {
         let Some(bridge) = self.java_mod_bridge.as_mut() else {
-            return;
+            return false;
         };
         if !bridge.is_ready() {
-            return;
+            return false;
         }
-        let sent = match bridge.try_send(snapshot) {
+        let sent = match (kind, reason) {
+            (FrameKind::Tick, None) => bridge.try_send_tick(snapshot),
+            (FrameKind::State, Some(reason)) => bridge.try_send_state(reason, snapshot),
+            _ => unreachable!("frame kind and state reason must agree"),
+        };
+        let sent = match sent {
             Ok(_) => true,
             Err(BridgeError::NotReady) => false,
             Err(error) => {
@@ -142,7 +177,7 @@ impl Game<'_> {
         };
         let status = {
             let Some(bridge) = self.java_mod_bridge.as_ref() else {
-                return;
+                return false;
             };
             bridge.status()
         };
@@ -150,6 +185,7 @@ impl Game<'_> {
             self.java_mod_bridge_has_sent_snapshot = true;
         }
         self.report_java_mod_bridge_status(status);
+        sent
     }
 
     /// Stops I/O before the rest of the window exits.
@@ -179,10 +215,20 @@ impl Game<'_> {
             game_time: self.world.game_time,
             day_time: self.world.day_time,
         });
+        let framebuffer =
+            self.renderer
+                .as_ref()
+                .map_or(FramebufferSnapshot::default(), |renderer| {
+                    FramebufferSnapshot {
+                        width: renderer.config.width,
+                        height: renderer.config.height,
+                    }
+                });
         Snapshot {
             world_open,
             player,
             clock,
+            framebuffer,
         }
     }
 

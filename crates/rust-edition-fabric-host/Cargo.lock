@@ -1847,6 +1847,7 @@ dependencies = [
 name = "rust-edition-fabric-host"
 version = "0.1.0"
 dependencies = [
+ "ring",
  "ristretto_vm",
  "rust-edition-fabric",
  "rust-edition-java",

@@ -3,12 +3,14 @@ use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use rust_edition_fabric::{Entrypoint, Limits, ModInfo, inspect_jar, inspect_jars};
+use rust_edition_fabric::{
+    Entrypoint, Limits, ModInfo, inspect_jar, inspect_jar_with_limits, inspect_jars,
+};
 use serde::Deserialize;
 use serde_json::Value;
 use zip::ZipArchive;
 
-const CONFIG_VERSION: u8 = 1;
+const CONFIG_VERSION: u8 = 2;
 const GAME_VERSION: &str = "26.3";
 const LOADER_VERSION: &str = "0.19.5";
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
@@ -23,6 +25,7 @@ struct HostConfig {
     java_home: PathBuf,
     game_version: String,
     fabric_loader_jar: PathBuf,
+    fabric_api_jar: PathBuf,
     minecraft_client_jar: PathBuf,
     libraries: Vec<PathBuf>,
     mods: Vec<PathBuf>,
@@ -40,6 +43,9 @@ pub enum CallbackGroup {
 pub struct ValidatedConfig {
     pub java_home: PathBuf,
     pub fabric_loader_jar: PathBuf,
+    pub fabric_api_jar: PathBuf,
+    pub fabric_api_base_entry: String,
+    pub fabric_lifecycle_entry: String,
     pub minecraft_client_jar: PathBuf,
     pub libraries: Vec<PathBuf>,
     pub mods: Vec<PathBuf>,
@@ -110,6 +116,7 @@ impl HostConfig {
         let java_home = absolute_directory(&self.java_home, "java_home")?;
         validate_java_home(&java_home)?;
         let fabric_loader_jar = absolute_jar(&self.fabric_loader_jar, "fabric_loader_jar")?;
+        let fabric_api_jar = absolute_jar(&self.fabric_api_jar, "fabric_api_jar")?;
         let minecraft_client_jar =
             absolute_jar(&self.minecraft_client_jar, "minecraft_client_jar")?;
         let libraries = canonical_jars(&self.libraries, "libraries")?;
@@ -118,6 +125,7 @@ impl HostConfig {
         let mut seen = HashSet::new();
         let mut total_bytes = 0_u64;
         for path in std::iter::once(&fabric_loader_jar)
+            .chain(std::iter::once(&fabric_api_jar))
             .chain(std::iter::once(&minecraft_client_jar))
             .chain(&libraries)
             .chain(&mods)
@@ -161,8 +169,25 @@ impl HostConfig {
             ));
         }
 
+        let (fabric_api_base_entry, fabric_lifecycle_entry) = validate_fabric_api(&fabric_api_jar)?;
+
         let inspection = inspect_jars(&mods, Limits::default())
             .map_err(|error| format!("could not inspect configured mod JARs: {error}"))?;
+        for required_api_id in [
+            "fabric-api",
+            "fabric-api-base",
+            "fabric-lifecycle-events-v1",
+        ] {
+            if inspection
+                .mods
+                .iter()
+                .any(|module| module.id == required_api_id)
+            {
+                return Err(format!(
+                    "mods must not include {required_api_id}, directly or nested; list only the root JAR in fabric_api_jar so the host can stage the two supported API modules"
+                ));
+            }
+        }
         let callback_group = validate_callback_entrypoint(
             &inspection.mods,
             &inspection.mod_id_conflicts,
@@ -173,6 +198,9 @@ impl HostConfig {
         Ok(ValidatedConfig {
             java_home,
             fabric_loader_jar,
+            fabric_api_jar,
+            fabric_api_base_entry,
+            fabric_lifecycle_entry,
             minecraft_client_jar,
             libraries,
             mods,
@@ -181,6 +209,87 @@ impl HostConfig {
             callback_group,
         })
     }
+}
+
+fn validate_fabric_api(path: &Path) -> Result<(String, String), String> {
+    let report = inspect_jar_with_limits(path, Limits::default())
+        .map_err(|error| format!("could not read Fabric API metadata: {error}"))?;
+    let source = path.to_string_lossy();
+    let roots = report
+        .mods
+        .iter()
+        .filter(|module| {
+            module.id == "fabric-api"
+                && module
+                    .top_level_sources
+                    .iter()
+                    .any(|candidate| candidate == source.as_ref())
+        })
+        .collect::<Vec<_>>();
+    if roots.len() != 1 {
+        return Err(format!(
+            "fabric_api_jar must declare exactly one top-level fabric-api mod, found {}",
+            roots.len()
+        ));
+    }
+    let root = roots[0];
+    if root.version != "0.162.0+26.3" {
+        return Err(format!(
+            "fabric_api_jar must be 0.162.0+26.3 for Minecraft 26.3, found {}",
+            root.version
+        ));
+    }
+
+    let entry_for = |prefix: &str| -> Result<String, String> {
+        let entries = root
+            .nested_jars
+            .iter()
+            .filter(|entry| {
+                entry
+                    .rsplit('/')
+                    .next()
+                    .is_some_and(|name| name.starts_with(prefix))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if entries.len() != 1 {
+            return Err(format!(
+                "fabric_api_jar must declare exactly one {prefix} nested JAR, found {}",
+                entries.len()
+            ));
+        }
+        Ok(entries[0].clone())
+    };
+    let base_entry = entry_for("fabric-api-base-")?;
+    let lifecycle_entry = entry_for("fabric-lifecycle-events-v1-")?;
+    for (entry, expected_id) in [
+        (&base_entry, "fabric-api-base"),
+        (&lifecycle_entry, "fabric-lifecycle-events-v1"),
+    ] {
+        let nested_source = format!("{source}!{entry}");
+        let matching = report
+            .mods
+            .iter()
+            .filter(|module| {
+                module.id == expected_id
+                    && module
+                        .sources
+                        .iter()
+                        .any(|candidate| candidate == &nested_source)
+            })
+            .count();
+        if matching != 1
+            || report
+                .mod_id_conflicts
+                .iter()
+                .any(|conflict| conflict.id == expected_id)
+        {
+            return Err(format!(
+                "declared Fabric API entry {entry} must contain exactly one {expected_id} module"
+            ));
+        }
+    }
+    Ok((base_entry, lifecycle_entry))
 }
 
 fn validate_java_home(home: &Path) -> Result<(), String> {
@@ -205,9 +314,11 @@ fn validate_java_home(home: &Path) -> Result<(), String> {
         "java.datatransfer",
         "java.desktop",
         "java.logging",
+        "java.prefs",
         "java.sql",
         "java.transaction.xa",
         "java.xml",
+        "jdk.zipfs",
     ] {
         if !home.join("jmods").join(format!("{module}.jmod")).is_file() {
             return Err(format!("java_home is missing the {module} JMOD"));
@@ -355,10 +466,10 @@ mod tests {
 
     #[test]
     fn config_rejects_unknown_fields_and_wrong_schema_versions() {
-        let unknown = r#"{"schema_version":1,"java_home":"/tmp/jdk","game_version":"26.3","fabric_loader_jar":"/tmp/loader.jar","minecraft_client_jar":"/tmp/game.jar","libraries":[],"mods":["/tmp/mod.jar"],"callback_mod_id":"probe","callback_class":"dev.rustedition.probe.TestMod","extra":true}"#;
+        let unknown = r#"{"schema_version":2,"java_home":"/tmp/jdk","game_version":"26.3","fabric_loader_jar":"/tmp/loader.jar","fabric_api_jar":"/tmp/fabric-api.jar","minecraft_client_jar":"/tmp/game.jar","libraries":[],"mods":["/tmp/mod.jar"],"callback_mod_id":"probe","callback_class":"dev.rustedition.probe.TestMod","extra":true}"#;
         assert!(serde_json::from_str::<HostConfig>(unknown).is_err());
 
-        let wrong_version = r#"{"schema_version":2,"java_home":"/tmp/jdk","game_version":"26.3","fabric_loader_jar":"/tmp/loader.jar","minecraft_client_jar":"/tmp/game.jar","libraries":[],"mods":["/tmp/mod.jar"],"callback_mod_id":"probe","callback_class":"dev.rustedition.probe.TestMod"}"#;
+        let wrong_version = r#"{"schema_version":1,"java_home":"/tmp/jdk","game_version":"26.3","fabric_loader_jar":"/tmp/loader.jar","fabric_api_jar":"/tmp/fabric-api.jar","minecraft_client_jar":"/tmp/game.jar","libraries":[],"mods":["/tmp/mod.jar"],"callback_mod_id":"probe","callback_class":"dev.rustedition.probe.TestMod"}"#;
         let config: HostConfig = serde_json::from_str(wrong_version).expect("valid JSON shape");
         assert!(config.validate().is_err());
     }

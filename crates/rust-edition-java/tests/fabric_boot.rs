@@ -24,6 +24,8 @@ const ASM_COMMONS_JAR: &str = "RUST_EDITION_JAVA_FABRIC_ASM_COMMONS_JAR";
 const ASM_TREE_JAR: &str = "RUST_EDITION_JAVA_FABRIC_ASM_TREE_JAR";
 const ASM_UTIL_JAR: &str = "RUST_EDITION_JAVA_FABRIC_ASM_UTIL_JAR";
 const MIXIN_JAR: &str = "RUST_EDITION_JAVA_FABRIC_MIXIN_JAR";
+const GUAVA_JAR: &str = "RUST_EDITION_JAVA_FABRIC_GUAVA_JAR";
+const FAILUREACCESS_JAR: &str = "RUST_EDITION_JAVA_FABRIC_FAILUREACCESS_JAR";
 
 const TEST_MOD: &str = r#"
 package dev.rustedition.probe;
@@ -143,9 +145,11 @@ fn validate_library_home(home: &Path) -> Result<(), Box<dyn std::error::Error>> 
         "java.datatransfer",
         "java.desktop",
         "java.logging",
+        "java.prefs",
         "java.sql",
         "java.transaction.xa",
         "java.xml",
+        "jdk.zipfs",
     ] {
         let path = home.join("jmods").join(format!("{module}.jmod"));
         if !path.is_file() {
@@ -289,7 +293,7 @@ async fn rust_bootstrap_starts_fabric_and_calls_a_mod_snapshot_method()
 -> Result<(), Box<dyn std::error::Error>> {
     let Some(opt_in) = env::var_os(OPT_IN) else {
         eprintln!(
-            "skipping: set {OPT_IN}=1 and provide all Java 25, Fabric, Mixin, ASM, and Minecraft JAR paths"
+            "skipping: set {OPT_IN}=1 and provide all Java 25, Fabric, Mixin, ASM, Guava, and Minecraft JAR paths"
         );
         return Ok(());
     };
@@ -316,6 +320,8 @@ async fn rust_bootstrap_starts_fabric_and_calls_a_mod_snapshot_method()
     let asm_tree_source = required_file(ASM_TREE_JAR)?;
     let asm_util_source = required_file(ASM_UTIL_JAR)?;
     let mixin_source = required_file(MIXIN_JAR)?;
+    let guava_source = required_file(GUAVA_JAR)?;
+    let failureaccess_source = required_file(FAILUREACCESS_JAR)?;
 
     let scratch = ScratchDir::new()?;
     let game_dir = scratch.0.join("game");
@@ -336,6 +342,8 @@ async fn rust_bootstrap_starts_fabric_and_calls_a_mod_snapshot_method()
     let asm_tree_jar = copy_jar(&asm_tree_source, &classpath_dir, "asm-tree.jar")?;
     let asm_util_jar = copy_jar(&asm_util_source, &classpath_dir, "asm-util.jar")?;
     let mixin_jar = copy_jar(&mixin_source, &classpath_dir, "sponge-mixin.jar")?;
+    let guava_jar = copy_jar(&guava_source, &classpath_dir, "guava.jar")?;
+    let failureaccess_jar = copy_jar(&failureaccess_source, &classpath_dir, "failureaccess.jar")?;
 
     let loader_id = read_json_string(&loader_jar, "fabric.mod.json", "id")?;
     let loader_version = read_json_string(&loader_jar, "fabric.mod.json", "version")?;
@@ -409,6 +417,8 @@ async fn rust_bootstrap_starts_fabric_and_calls_a_mod_snapshot_method()
         asm_tree_jar,
         asm_util_jar,
         mixin_jar,
+        guava_jar,
+        failureaccess_jar,
     ];
 
     let class_path = env::join_paths(&class_paths)?

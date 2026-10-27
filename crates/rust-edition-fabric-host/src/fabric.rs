@@ -1,6 +1,8 @@
-use std::fs;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ristretto_vm::{Error as VmError, Parameters};
@@ -8,7 +10,10 @@ use rust_edition_java::{
     Error as JavaAdapterError, JavaVm, MethodExecutionPolicy, NativeMethod, NativeResult,
     RustValue, Thread, Value,
 };
-use rust_edition_mod_bridge::MAX_VALUE_BYTES;
+use rust_edition_mod_bridge::{FramebufferSnapshot, MAX_VALUE_BYTES, Snapshot};
+use zip::ZipArchive;
+
+mod identifier;
 
 use crate::config::{CallbackGroup, ValidatedConfig};
 
@@ -18,6 +23,10 @@ pub struct FabricRuntime {
     vm: JavaVm,
     callback_instance: Value,
     callback_class: String,
+    client_tick_event: Value,
+    minecraft_mirror: Value,
+    window_mirror: Value,
+    host_state: Arc<HostState>,
 }
 
 impl FabricRuntime {
@@ -33,14 +42,23 @@ impl FabricRuntime {
         let mods_dir_path = staged.mods_dir.to_string_lossy().into_owned();
         let fabric_log_path = staged.fabric_log.to_string_lossy().into_owned();
         let host_state = Arc::new(HostState::default());
-        let native_signature = format!("{}.hostCall()I", config.callback_class.replace('.', "/"));
+        let internal_callback_class = config.callback_class.replace('.', "/");
+        let native_signature = format!("{internal_callback_class}.hostCall()I");
+        let observe_window_signature = format!(
+            "{internal_callback_class}.observeWindow(Lnet/minecraft/client/Minecraft;Lcom/mojang/blaze3d/platform/Window;II)V"
+        );
         let method_policy =
             MethodExecutionPolicy::deny_class_prefixes(["net/minecraft/", "com/mojang/blaze3d/"]);
-        let vm = JavaVm::new_with_host_context_and_policy(
+        let vm = JavaVm::new_with_host_hooks(
             &config.java_home,
             &staged.class_paths,
-            [NativeMethod::sync(native_signature, host_call)],
-            host_state,
+            [
+                NativeMethod::sync(native_signature, host_call),
+                NativeMethod::sync(observe_window_signature, observe_window),
+            ],
+            identifier::methods(),
+            identifier::initializers(),
+            host_state.clone(),
             method_policy,
         )
         .await
@@ -171,15 +189,78 @@ impl FabricRuntime {
         let (callback_instance, runtime_class) =
             callback.ok_or_else(|| "configured callback was not loaded".to_owned())?;
         validate_callback_method(&vm, &runtime_class, &callback_instance).await?;
+        let client_tick_event = get_client_tick_event(&vm).await?;
+
+        // These raw game objects are mirrors. Ristretto allocates them without running
+        // Minecraft or Window constructors, and the event probe can read only the exact
+        // fields and getters granted below.
+        let minecraft_mirror = vm
+            .allocate_object_without_initialization("net.minecraft.client.Minecraft")
+            .await
+            .map_err(|error| {
+                format!("could not allocate the Minecraft client mirror without its constructor: {error}")
+            })?;
+        let window_mirror = vm
+            .allocate_object_without_initialization("com.mojang.blaze3d.platform.Window")
+            .await
+            .map_err(|error| {
+                format!("could not allocate the Window mirror without its constructor: {error}")
+            })?;
+        vm.set_host_object_field(&minecraft_mirror, "window", window_mirror.clone())
+            .await
+            .map_err(|error| format!("could not link the Minecraft and Window mirrors: {error}"))?;
+        *host_state.mirrors.lock().map_err(|_| {
+            "could not record the Minecraft and Window mirrors because the host lock failed"
+                .to_owned()
+        })? = Some((minecraft_mirror.clone(), window_mirror.clone()));
+        vm.allow_method_on_host_object(
+            &minecraft_mirror,
+            "net/minecraft/client/Minecraft.getWindow()Lcom/mojang/blaze3d/platform/Window;",
+        )
+        .map_err(|error| format!("could not allow the mirror's window getter: {error}"))?;
+        vm.allow_field_read_on_host_object(
+            &minecraft_mirror,
+            "net/minecraft/client/Minecraft.window:Lcom/mojang/blaze3d/platform/Window;",
+        )
+        .map_err(|error| format!("could not allow the mirror's window field read: {error}"))?;
+        for signature in [
+            "com/mojang/blaze3d/platform/Window.getWidth()I",
+            "com/mojang/blaze3d/platform/Window.getHeight()I",
+        ] {
+            vm.allow_method_on_host_object(&window_mirror, signature)
+                .map_err(|error| format!("could not allow a read-only Window getter: {error}"))?;
+        }
+        for signature in [
+            "com/mojang/blaze3d/platform/Window.framebufferWidth:I",
+            "com/mojang/blaze3d/platform/Window.framebufferHeight:I",
+        ] {
+            vm.allow_field_read_on_host_object(&window_mirror, signature)
+                .map_err(|error| {
+                    format!("could not allow a read-only Window field read: {error}")
+                })?;
+        }
 
         Ok(Self {
             vm,
             callback_instance,
             callback_class: runtime_class,
+            client_tick_event,
+            minecraft_mirror,
+            window_mirror,
+            host_state,
         })
     }
 
-    pub async fn on_snapshot(&self, snapshot_json: &str) -> Result<Option<String>, String> {
+    pub async fn on_frame(
+        &self,
+        snapshot: &Snapshot,
+        snapshot_json: &str,
+        dispatch_client_tick: bool,
+    ) -> Result<Option<String>, String> {
+        self.update_framebuffer(snapshot.framebuffer).await?;
+        if dispatch_client_tick {
+            self.dispatch_end_client_tick().await?;
+        }
         let java_snapshot = java_string(&self.vm, snapshot_json).await?;
         let arguments = [self.callback_instance.clone(), java_snapshot];
         let result = invoke_java(
@@ -200,6 +281,94 @@ impl FabricRuntime {
                 format!("Fabric snapshot callback did not return a Java String: {error}")
             })
     }
+
+    async fn update_framebuffer(&self, framebuffer: FramebufferSnapshot) -> Result<(), String> {
+        *self.host_state.framebuffer.lock().map_err(|_| {
+            "could not update the Window mirror because its host lock failed".to_owned()
+        })? = framebuffer;
+        self.vm
+            .set_host_object_field(
+                &self.window_mirror,
+                "framebufferWidth",
+                Value::Int(
+                    i32::try_from(framebuffer.width)
+                        .map_err(|error| format!("framebuffer width is too large: {error}"))?,
+                ),
+            )
+            .await
+            .map_err(|error| format!("could not update the Window framebuffer width: {error}"))?;
+        self.vm
+            .set_host_object_field(
+                &self.window_mirror,
+                "framebufferHeight",
+                Value::Int(
+                    i32::try_from(framebuffer.height)
+                        .map_err(|error| format!("framebuffer height is too large: {error}"))?,
+                ),
+            )
+            .await
+            .map_err(|error| format!("could not update the Window framebuffer height: {error}"))
+    }
+
+    async fn dispatch_end_client_tick(&self) -> Result<(), String> {
+        // Fabric replaces an array-backed event's invoker when a mod adds a listener,
+        // so look it up for every real client tick.
+        let client_tick_invoker =
+            get_client_tick_invoker(&self.vm, &self.client_tick_event).await?;
+        let arguments = [client_tick_invoker, self.minecraft_mirror.clone()];
+        invoke_java(
+            &self.vm,
+            "net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents$EndTick",
+            "onEndTick(Lnet/minecraft/client/Minecraft;)V",
+            &arguments,
+        )
+        .await
+        .map_err(|error| {
+            format!("could not invoke the real Fabric END_CLIENT_TICK callback: {error}")
+        })?;
+        Ok(())
+    }
+}
+
+async fn get_client_tick_event(vm: &JavaVm) -> Result<Value, String> {
+    let class = class_object(
+        vm,
+        "net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents",
+    )
+    .await
+    .map_err(|error| format!("could not load Fabric ClientTickEvents: {error}"))?;
+    let field_name = java_string(vm, "END_CLIENT_TICK").await?;
+    let field = invoke_value(
+        vm,
+        "java.lang.Class",
+        "getField(Ljava/lang/String;)Ljava/lang/reflect/Field;",
+        &[class, field_name],
+    )
+    .await
+    .map_err(|error| format!("could not find Fabric END_CLIENT_TICK: {error}"))?;
+    let event = invoke_value(
+        vm,
+        "java.lang.reflect.Field",
+        "get(Ljava/lang/Object;)Ljava/lang/Object;",
+        &[field, Value::Object(None)],
+    )
+    .await
+    .map_err(|error| format!("could not read Fabric END_CLIENT_TICK: {error}"))?;
+    if event.is_null() {
+        return Err("Fabric END_CLIENT_TICK field returned null".into());
+    }
+    Ok(event)
+}
+
+async fn get_client_tick_invoker(vm: &JavaVm, event: &Value) -> Result<Value, String> {
+    invoke_value(
+        vm,
+        "net.fabricmc.fabric.api.event.Event",
+        "invoker()Ljava/lang/Object;",
+        std::slice::from_ref(event),
+    )
+    .await
+    .map_err(|error| format!("could not get the current Fabric END_CLIENT_TICK invoker: {error}"))
 }
 
 struct StagedFiles {
@@ -250,6 +419,18 @@ impl StagedFiles {
                 &class_dir.join(format!("library-{index:04}.jar")),
             )?);
         }
+        // Use only the two Fabric API modules needed by this event proof. The outer
+        // aggregate JAR stays untouched and never enters the helper's mods folder.
+        class_paths.push(copy_declared_nested_jar(
+            &config.fabric_api_jar,
+            &config.fabric_api_base_entry,
+            &mods_dir.join("fabric-api-base.jar"),
+        )?);
+        class_paths.push(copy_declared_nested_jar(
+            &config.fabric_api_jar,
+            &config.fabric_lifecycle_entry,
+            &mods_dir.join("fabric-lifecycle-events-v1.jar"),
+        )?);
         for (index, path) in config.mods.iter().enumerate() {
             let path = copy_jar(path, &mods_dir.join(format!("mod-{index:04}.jar")))?;
             class_paths.push(path);
@@ -264,6 +445,52 @@ impl StagedFiles {
             class_paths,
         })
     }
+}
+
+fn copy_declared_nested_jar(
+    source: &Path,
+    entry_name: &str,
+    destination: &Path,
+) -> Result<PathBuf, String> {
+    let file = File::open(source)
+        .map_err(|error| format!("could not open the configured Fabric API JAR: {error}"))?;
+    let mut archive = ZipArchive::new(file)
+        .map_err(|error| format!("configured Fabric API JAR is invalid: {error}"))?;
+    let entry = archive.by_name(entry_name).map_err(|error| {
+        format!("Fabric API metadata names a missing nested JAR {entry_name}: {error}")
+    })?;
+    if entry.is_dir() {
+        return Err(format!(
+            "Fabric API nested JAR is a directory: {entry_name}"
+        ));
+    }
+    let size = entry.size();
+    let limit = rust_edition_fabric::Limits::default().max_nested_jar_bytes;
+    if size > limit {
+        return Err(format!(
+            "Fabric API nested JAR {entry_name} exceeds the {limit}-byte limit"
+        ));
+    }
+    let mut destination_file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(destination)
+        .map_err(|error| format!("could not create a nested Fabric API JAR in scratch: {error}"))?;
+    let mut limited_entry = entry.take(limit + 1);
+    let copied = io::copy(&mut limited_entry, &mut destination_file).map_err(|error| {
+        format!("could not extract Fabric API nested JAR {entry_name}: {error}")
+    })?;
+    if copied > limit {
+        return Err(format!(
+            "Fabric API nested JAR {entry_name} expands beyond the {limit}-byte limit"
+        ));
+    }
+    if copied != size {
+        return Err(format!(
+            "Fabric API nested JAR {entry_name} was only partly copied ({copied} of {size} bytes)"
+        ));
+    }
+    Ok(destination.to_path_buf())
 }
 
 fn copy_jar(source: &Path, destination: &Path) -> Result<PathBuf, String> {
@@ -740,6 +967,8 @@ fn tail_utf8(value: &str, maximum: usize) -> &str {
 #[derive(Default)]
 struct HostState {
     native_calls: AtomicUsize,
+    framebuffer: Mutex<FramebufferSnapshot>,
+    mirrors: Mutex<Option<(Value, Value)>>,
 }
 
 #[allow(
@@ -758,4 +987,61 @@ fn host_call(thread: Arc<Thread>, _parameters: Parameters) -> NativeResult<Optio
     let result = i32::try_from(result)
         .map_err(|error| VmError::InternalError(format!("callback count is too large: {error}")))?;
     Ok(Some(Value::Int(result)))
+}
+
+#[allow(
+    clippy::result_large_err,
+    reason = "the native callback must use Ristretto's declared result type"
+)]
+fn observe_window(thread: Arc<Thread>, mut parameters: Parameters) -> NativeResult<Option<Value>> {
+    let height = parameters.pop_int()?;
+    let width = parameters.pop_int()?;
+    let window = parameters.pop()?;
+    let minecraft = parameters.pop()?;
+    let state = thread
+        .vm()?
+        .host_context()
+        .ok_or_else(|| VmError::InternalError("Fabric callback has no host state".into()))?;
+    let state = Arc::downcast::<HostState>(state).map_err(|_| {
+        VmError::InternalError("Fabric callback host state has the wrong type".into())
+    })?;
+    let expected = *state
+        .framebuffer
+        .lock()
+        .map_err(|_| VmError::InternalError("Fabric framebuffer lock failed".into()))?;
+    let mirrors = state
+        .mirrors
+        .lock()
+        .map_err(|_| VmError::InternalError("Fabric mirror lock failed".into()))?;
+    let Some((expected_minecraft, expected_window)) = mirrors.as_ref() else {
+        return Err(VmError::InternalError(
+            "Fabric mirrors were not ready for END_CLIENT_TICK".into(),
+        ));
+    };
+    if !same_java_object(&minecraft, expected_minecraft)
+        || !same_java_object(&window, expected_window)
+    {
+        return Err(VmError::InternalError(
+            "Fabric END_CLIENT_TICK received a different Minecraft or Window mirror".into(),
+        ));
+    }
+    if width < 0
+        || height < 0
+        || u32::try_from(width).ok() != Some(expected.width)
+        || u32::try_from(height).ok() != Some(expected.height)
+    {
+        return Err(VmError::InternalError(format!(
+            "Fabric END_CLIENT_TICK read Window size {width}x{height}, expected {}x{}",
+            expected.width, expected.height
+        )));
+    }
+    Ok(None)
+}
+
+fn same_java_object(left: &Value, right: &Value) -> bool {
+    match (left, right) {
+        (Value::Object(Some(left)), Value::Object(Some(right))) => left.ptr_eq(right),
+        (Value::Object(None), Value::Object(None)) => true,
+        _ => false,
+    }
 }
